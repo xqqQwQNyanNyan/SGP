@@ -1,18 +1,12 @@
 import argparse
-import http.client
 import importlib.util
 import json
 import os
-import shlex
 import socket
-import subprocess
 import sys
 import threading
-from urllib.parse import urlsplit
 
 from protocol import (
-    b64_decode,
-    b64_encode,
     auth_proof,
     close_quietly,
     make_msg,
@@ -26,6 +20,10 @@ from protocol import (
 
 DEFAULT_SERVICE_TOKEN = "service-token"
 DEFAULT_ENDPOINT_TOKEN = "endpoint-token"
+
+
+def builtin_handler_path(filename):
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "handlers", filename)
 
 
 def build_services(service_token, endpoint_token, http_page_port, http_api_port):
@@ -61,6 +59,7 @@ def build_services(service_token, endpoint_token, http_page_port, http_api_port)
                 "example_output": {"reply": "Agent received text"},
             },
             "metadata": {},
+            "handler": {"path": builtin_handler_path("text_echo.py"), "function": "handle"},
         },
         {
             "service_id": "win-command",
@@ -95,6 +94,7 @@ def build_services(service_token, endpoint_token, http_page_port, http_api_port)
             "metadata": {
                 "allow_commands": ["pwd", "dir", "ls", "git status", "python --version", "python3 --version"]
             },
+            "handler": {"path": builtin_handler_path("command_exec.py"), "function": "handle"},
         },
         {
             "service_id": "frontend-workspace",
@@ -156,6 +156,7 @@ def build_services(service_token, endpoint_token, http_page_port, http_api_port)
                 "example_output": {"http_status": 200, "headers": {"Content-Type": "text/html"}, "body_base64": "..."},
             },
             "metadata": {},
+            "handler": {"path": builtin_handler_path("http_bundle.py"), "function": "handle"},
         },
     ]
 
@@ -245,97 +246,6 @@ def load_custom_handlers(services):
     return handlers
 
 
-def handle_text_echo(input_obj):
-    text = str(input_obj.get("text", ""))
-    return 200, "OK", {"reply": f"Agent received {len(text.encode('utf-8'))} bytes: {text}"}
-
-
-def command_args(command):
-    if os.name == "nt":
-        if command == "dir":
-            return ["cmd", "/c", "dir"]
-        if command == "pwd":
-            return ["cmd", "/c", "cd"]
-    if command == "dir":
-        return ["ls"]
-    return shlex.split(command)
-
-
-def handle_command(service, input_obj):
-    command = str(input_obj.get("command", "")).strip()
-    allowed = service.get("metadata", {}).get("allow_commands", [])
-    if command not in allowed:
-        return 403, "COMMAND_NOT_ALLOWED", {"allowed": allowed}
-    try:
-        result = subprocess.run(
-            command_args(command),
-            capture_output=True,
-            text=True,
-            timeout=float(service.get("policy", {}).get("timeout_sec", 10)),
-            shell=False,
-        )
-        return 200, "OK", {
-            "exit_code": result.returncode,
-            "stdout": result.stdout[-4000:],
-            "stderr": result.stderr[-4000:],
-        }
-    except subprocess.TimeoutExpired:
-        return 408, "COMMAND_TIMEOUT", {"exit_code": -1, "stdout": "", "stderr": "timeout"}
-    except OSError as exc:
-        return 502, "COMMAND_FAILED", {"exit_code": -1, "stdout": "", "stderr": str(exc)}
-
-
-def safe_path(path):
-    if not path:
-        return "/"
-    parsed = urlsplit(path)
-    value = parsed.path or "/"
-    if parsed.query:
-        value += "?" + parsed.query
-    return value
-
-
-def handle_http(service, input_obj):
-    endpoint_id = input_obj.get("endpoint_id")
-    method = str(input_obj.get("method", "GET")).upper()
-    endpoint = None
-    for item in service.get("endpoints", []):
-        if item.get("endpoint_id") == endpoint_id:
-            endpoint = item
-            break
-    if not endpoint:
-        return 404, "ENDPOINT_NOT_FOUND", {}
-    if method not in endpoint.get("allow_methods", ["GET"]):
-        return 403, "METHOD_NOT_ALLOWED", {"allow_methods": endpoint.get("allow_methods", [])}
-
-    body = b64_decode(input_obj.get("body_base64", ""))
-    if len(body) > int(service.get("policy", {}).get("max_payload_size", 65536)):
-        return 413, "BODY_TOO_LARGE", {}
-    headers = input_obj.get("headers", {})
-    if not isinstance(headers, dict):
-        headers = {}
-
-    conn = http.client.HTTPConnection(
-        endpoint.get("target_host", "127.0.0.1"),
-        int(endpoint.get("target_port", 80)),
-        timeout=float(service.get("policy", {}).get("timeout_sec", 5)),
-    )
-    try:
-        conn.request(method, safe_path(input_obj.get("path", "/")), body=body if method == "POST" else None, headers=headers)
-        resp = conn.getresponse()
-        data = resp.read(65536)
-        return 200, "OK", {
-            "http_status": resp.status,
-            "headers": dict(resp.getheaders()),
-            "body_base64": b64_encode(data),
-            "body_preview": data[:500].decode("utf-8", errors="replace"),
-        }
-    except (OSError, http.client.HTTPException) as exc:
-        return 502, "HTTP_REQUEST_FAILED", {"error": str(exc)}
-    finally:
-        conn.close()
-
-
 def normalize_handler_result(result):
     if isinstance(result, tuple) and len(result) == 3:
         status, message, output = result
@@ -351,14 +261,7 @@ def handle_call(services_by_id, custom_handlers, req):
     if not service:
         return make_resp(req, "agent", 404, "SERVICE_NOT_FOUND")
     input_obj = req.get("payload", {}).get("input", {})
-    service_type = service.get("service_type")
-    if service_type == "text.echo":
-        status, message, output = handle_text_echo(input_obj)
-    elif service_type == "command.exec":
-        status, message, output = handle_command(service, input_obj)
-    elif service_type == "http.bundle":
-        status, message, output = handle_http(service, input_obj)
-    elif service_id in custom_handlers:
+    if service_id in custom_handlers:
         try:
             result = custom_handlers[service_id](service, input_obj)
             status, message, output = normalize_handler_result(result)
@@ -393,7 +296,10 @@ def send_locked(sock, msg, cipher_key, send_lock):
 
 
 def handle_call_worker(sock, cipher_key, send_lock, services_by_id, custom_handlers, req):
+    service_id = req.get("service_id")
+    print(f"[agent] CALL received service_id={service_id} id={req.get('id')}")
     resp = handle_call(services_by_id, custom_handlers, req)
+    print(f"[agent] CALL completed service_id={service_id} status={resp.get('status')} message={resp.get('message')}")
     try:
         send_locked(sock, resp, cipher_key, send_lock)
     except OSError:

@@ -46,9 +46,12 @@ Relay 只理解连接角色、登录状态、Service 目录、Service access pro
 
 - `protocol.py`：SGP 二进制帧头、JSON/加密 JSON body 收发、消息构造、SHA256、HMAC、base64 工具。
 - `relay.py`：中继服务器，处理认证、服务目录、LIST、CALL 转发和错误响应。
-- `agent.py`：Node 的服务发布入口，发布内置示例服务并处理 CALL。
+- `agent.py`：Node 的服务发布入口，发布 Service 并把 CALL 分发给 handler。
 - `client.py`：Node 的服务调用入口，支持 LIST、示例 CALL 和通用 JSON CALL。
 - `services.example.json`：扩展 Service 示例配置。
+- `handlers/text_echo.py`：`text.echo` 示例 handler。
+- `handlers/command_exec.py`：`command.exec` 示例 handler。
+- `handlers/http_bundle.py`：`http.bundle` 示例 handler。
 - `handlers/file_transfer.py`：扩展示例 `file.transfer` 的本地 handler。
 - `Socket协议设计草案.md`：协议设计说明。
 
@@ -102,6 +105,63 @@ python3 client.py --relay-host 127.0.0.1 --relay-port 9000
 ## 示例 Service 调用
 
 以下命令用于演示协议中的 `LIST` 和 `CALL`，它们不是新增协议命令，只是不同 Service 的 `payload.input` 示例。
+
+### 保存 Client 连接配置
+
+如果 Relay 不在本机，第一次运行时可以保存连接参数：
+
+```bash
+python3 client.py --relay-host 81.70.233.96 --relay-port 9000 --secret demo_secret --save-config
+```
+
+也可以直接复制并编辑配置文件：
+
+```bash
+cp client.config.example.json client.config.json
+```
+
+`client.config.json` 示例：
+
+```json
+{
+  "relay_host": "81.70.233.96",
+  "relay_port": 9000,
+  "secret": "demo_secret",
+  "service_token": "service-token",
+  "endpoint_token": "endpoint-token"
+}
+```
+
+之后 `client.py` 会默认读取 `client.config.json`，常用命令可以简化为：
+
+```bash
+python3 client.py
+python3 client.py --list
+python3 client.py --call text --text "hello"
+python3 client.py --call command --command "pwd"
+```
+
+直接运行 `python3 client.py` 会登录一次并进入长连接交互模式，不需要每次重新认证。进入后可反复执行：
+
+```text
+sgp> list
+sgp> text hello
+sgp> cmd pwd
+sgp> http /
+sgp> call
+sgp> config
+sgp> set service-token your_service_token
+sgp> save-config
+sgp> quit
+```
+
+默认输出会整理成服务表格或调用结果；如果需要查看完整协议 JSON，可加：
+
+```bash
+python3 client.py --list --json
+```
+
+注意：`secret` 用于登录 Relay；`service_token` 用于调用 Agent 发布的 Service。若 `CALL` 返回 `SERVICE_TOKEN_INVALID`，说明 Relay 在转发前已拒绝请求，Agent 端不会收到这次调用。
 
 ### 查询服务目录
 
