@@ -21,7 +21,7 @@ SGP 消息使用：
 | `magic` | 4B | 固定为 `SGP1`，用于识别协议帧 |
 | `major/minor` | 2B | 帧格式版本，用于兼容性判断 |
 | `header_len` | 2B | 当前为 `24`，为后续扩展头预留空间 |
-| `body_type` | 1B | 当前为 `1`，表示 JSON body |
+| `body_type` | 1B | `1` 表示 JSON body，`2` 表示认证后的加密 JSON body |
 | `flags` | 1B | 标志位，当前保留 |
 | `reserved` | 2B | 保留字段，当前必须为 0 |
 | `body_len` | 4B | JSON body 字节长度，解决 TCP 粘包/半包 |
@@ -40,11 +40,11 @@ version, type, id, role, cmd, token, service_id, payload, status, message, ext
 HELLO, AUTH, PUBLISH, LIST, CALL, PING, ERROR
 ```
 
-Relay 只理解连接角色、登录状态、Service 目录、Service access token、通用 policy 和 CALL 路由；Relay 不解释 `payload.input` 中的具体业务字段。具体 Service 由发布服务的 Node 处理。
+Relay 只理解连接角色、登录状态、Service 目录、Service access proof、endpoint access proof、生命周期状态、通用 policy、Service schema 和 CALL 路由；Relay 支持多个 Node 并发连接，并通过消息 id 在同一 Agent 连接上复用多个并发 `CALL`。Relay 不解释 `payload.input` 中的具体业务语义，但会按 `contract.input_schema` 做通用结构校验，并在 endpoint 声明鉴权时做 endpoint 级授权。具体 Service 由发布服务的 Node 处理。
 
 ## 文件结构
 
-- `protocol.py`：SGP 二进制帧头、JSON body 收发、消息构造、SHA256、base64 工具。
+- `protocol.py`：SGP 二进制帧头、JSON/加密 JSON body 收发、消息构造、SHA256、HMAC、base64 工具。
 - `relay.py`：中继服务器，处理认证、服务目录、LIST、CALL 转发和错误响应。
 - `agent.py`：Node 的服务发布入口，发布内置示例服务并处理 CALL。
 - `client.py`：Node 的服务调用入口，支持 LIST、示例 CALL 和通用 JSON CALL。
@@ -56,8 +56,9 @@ Relay 只理解连接角色、登录状态、Service 目录、Service access tok
 
 - Relay 登录共享密钥：`sgp-demo-secret`
 - Service 访问 token：`service-token`
+- Endpoint 访问 token：`endpoint-token`
 
-真实公网环境不应使用默认口令。本实验原型没有 TLS，token 会明文经过 TCP 连接。
+真实公网环境不应使用默认口令。本实验原型没有 TLS，因此仍不具备工业级传输安全；当前版本通过 challenge-response 派生会话密钥，认证成功后的帧 body 使用 HMAC keystream 加密，抓包时看不到 JSON 明文，也不会直接看到共享密钥、密钥哈希或 Service token。
 
 ## 最小协议演示
 
@@ -69,7 +70,7 @@ Relay 只理解连接角色、登录状态、Service 目录、Service access tok
 python3 relay.py --host 127.0.0.1 --port 9000
 ```
 
-Relay 负责接受 Node 连接、维护 Service 目录、校验认证信息，并把 `CALL` 路由到发布对应 Service 的 Node。
+Relay 负责接受 Node 连接、维护 Service 目录、校验认证信息，并把 `CALL` 路由到发布对应 Service 的 Node。Relay 还会维护服务租约并向空闲 Agent 发送 `PING` 保活，Agent 失联后会把相关 Service 标记为 offline。
 
 ### 2. 启动发布服务的 Node
 
@@ -115,6 +116,8 @@ Client -> Relay: LIST
 Relay -> Client: services[]
 ```
 
+服务目录中的 `contract` 包含 `input_schema`、`output_schema` 和示例输入输出。Client 可按 schema 构造请求，Relay 会在转发前校验 `payload.input`。
+
 ### 调用文本示例 Service
 
 ```bash
@@ -152,14 +155,16 @@ python3 -m http.server 8000
 python3 client.py --call http --endpoint page --method GET --path /
 ```
 
-如果需要演示 `api` endpoint，可另起一个 3000 端口 HTTP 服务，或启动自己的本地 API：
+如果需要演示 `api` endpoint，可另起一个 3000 端口 HTTP 服务，或启动自己的本地 API。默认配置中 `page` 只需要 Service token，`api` 还需要 endpoint token：
 
 ```bash
 python3 -m http.server 3000
-python3 client.py --call http --endpoint api --method GET --path /
+python3 client.py --call http --endpoint api --endpoint-token endpoint-token --method GET --path /
 ```
 
 ### 演示错误处理
+
+错误响应保留 `status/message`，并在 `payload.error` 中提供分级信息：`code`、`category`、`retryable`、`hint`，必要时还会带 `detail`。
 
 错误 service token：
 
@@ -252,7 +257,7 @@ python3 client.py --call generic --service-id file-box --input-json '{"op":"writ
 
 1. 启动 `relay.py`，说明 Relay 是协议中继和服务目录。
 2. 启动 `agent.py`，展示 Node 通过 `PUBLISH` 发布 3 个示例 Service。
-3. 启动 `client.py`，选择 LIST，展示服务目录、endpoint 和 contract。
+3. 启动 `client.py`，选择 LIST，展示服务目录、endpoint、contract 和 lifecycle。
 4. 调用 `note-box`，展示统一 `CALL` 可以承载文本示例。
 5. 调用 `win-command`，输入 `pwd` 或 `git status`，展示 Service 级白名单。
 6. 启动 `python3 -m http.server 8000`。
@@ -269,7 +274,8 @@ SGP 承认并采用 RPC-style 的请求响应调用模型。它与普通 RPC 的
 - 调用对象不是固定函数，而是 Relay 目录中的 Service。
 - 协议内置 `PUBLISH` 和 `LIST`，调用方可以动态发现服务。
 - Agent 和 Client 都主动连接 Relay，适合 NAT 后个人设备服务暴露。
-- Relay 不仅转发，还做 session 校验、Service token 校验、payload 大小限制、超时、频率限制和在线状态维护。
-- Service 的具体输入输出由 `contract` 描述，协议核心命令不随业务类型增加。
+- 同一个 Agent 可以发布多个 Service；多个 Client 可以同时调用，Relay 按消息 id 分发响应。
+- Relay 不仅转发，还做 session 校验、Service token 校验、payload 大小限制、超时、频率限制、服务租约和在线状态维护。
+- Service 的具体输入输出由 `contract.input_schema`、`contract.output_schema` 和 example 描述，协议核心命令不随业务类型增加。
 
 因此，SGP 可以被描述为“面向个人跨设备服务发现与受控调用的 RPC-style 应用层协议”。

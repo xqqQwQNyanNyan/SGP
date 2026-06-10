@@ -15,6 +15,20 @@
       },
       "endpoints": [],
       "contract": {
+        "input_schema": {
+          "type": "object",
+          "required": ["op"],
+          "properties": {
+            "op": { "type": "string", "enum": ["list", "stat", "read_chunk", "write_chunk"] },
+            "path": { "type": "string", "maxLength": 2048 },
+            "offset": { "type": "integer", "minimum": 0 },
+            "size": { "type": "integer", "minimum": 1, "maximum": 65536 },
+            "data_base64": { "type": "string" }
+          }
+        },
+        "output_schema": {
+          "type": "object"
+        },
         "example_input": {
           "op": "read_chunk",
           "path": "hello.txt",
@@ -53,6 +67,22 @@
       },
       "endpoints": [],
       "contract": {
+        "input_schema": {
+          "type": "object",
+          "required": ["text"],
+          "properties": {
+            "text": { "type": "string", "maxLength": 1024 }
+          },
+          "additionalProperties": false
+        },
+        "output_schema": {
+          "type": "object",
+          "required": ["reply"],
+          "properties": {
+            "reply": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
         "example_input": {
           "text": "hello custom service"
         },
@@ -77,6 +107,24 @@
       },
       "endpoints": [],
       "contract": {
+        "input_schema": {
+          "type": "object",
+          "required": ["command"],
+          "properties": {
+            "command": { "type": "string", "enum": ["pwd", "dir", "ls", "git status"] }
+          },
+          "additionalProperties": false
+        },
+        "output_schema": {
+          "type": "object",
+          "required": ["exit_code", "stdout", "stderr"],
+          "properties": {
+            "exit_code": { "type": "integer" },
+            "stdout": { "type": "string" },
+            "stderr": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
         "example_input": {
           "command": "pwd"
         },
@@ -110,10 +158,36 @@
           "target_host": "127.0.0.1",
           "target_port": 8000,
           "allow_methods": ["GET", "POST"],
+          "auth": {
+            "access_token": "endpoint-token"
+          },
           "description": "Custom local page server"
         }
       ],
       "contract": {
+        "input_schema": {
+          "type": "object",
+          "required": ["endpoint_id", "method", "path"],
+          "properties": {
+            "endpoint_id": { "type": "string", "enum": ["page"] },
+            "method": { "type": "string", "enum": ["GET", "POST"] },
+            "path": { "type": "string", "minLength": 1, "maxLength": 2048 },
+            "headers": { "type": "object" },
+            "body_base64": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        "output_schema": {
+          "type": "object",
+          "required": ["http_status", "headers", "body_base64"],
+          "properties": {
+            "http_status": { "type": "integer" },
+            "headers": { "type": "object" },
+            "body_base64": { "type": "string" },
+            "body_preview": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
         "example_input": {
           "endpoint_id": "page",
           "method": "GET",

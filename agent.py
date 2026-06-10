@@ -7,16 +7,30 @@ import shlex
 import socket
 import subprocess
 import sys
+import threading
 from urllib.parse import urlsplit
 
-from protocol import b64_decode, b64_encode, close_quietly, make_msg, make_resp, recv_msg, send_msg, sha256_text
+from protocol import (
+    b64_decode,
+    b64_encode,
+    auth_proof,
+    close_quietly,
+    make_msg,
+    make_resp,
+    recv_msg,
+    send_msg,
+    session_key_from_secret,
+    sha256_text,
+)
 
 
 DEFAULT_SERVICE_TOKEN = "service-token"
+DEFAULT_ENDPOINT_TOKEN = "endpoint-token"
 
 
-def build_services(service_token, http_page_port, http_api_port):
+def build_services(service_token, endpoint_token, http_page_port, http_api_port):
     token_hash = sha256_text(service_token)
+    endpoint_token_hash = sha256_text(endpoint_token)
     return [
         {
             "service_id": "note-box",
@@ -27,6 +41,22 @@ def build_services(service_token, http_page_port, http_api_port):
             "policy": {"max_payload_size": 2048, "timeout_sec": 3, "max_calls_per_minute": 30},
             "endpoints": [],
             "contract": {
+                "input_schema": {
+                    "type": "object",
+                    "required": ["text"],
+                    "properties": {
+                        "text": {"type": "string", "maxLength": 1024}
+                    },
+                    "additionalProperties": False,
+                },
+                "output_schema": {
+                    "type": "object",
+                    "required": ["reply"],
+                    "properties": {
+                        "reply": {"type": "string"}
+                    },
+                    "additionalProperties": False,
+                },
                 "example_input": {"text": "hello from mac"},
                 "example_output": {"reply": "Agent received text"},
             },
@@ -41,6 +71,24 @@ def build_services(service_token, http_page_port, http_api_port):
             "policy": {"max_payload_size": 2048, "timeout_sec": 10, "max_calls_per_minute": 20},
             "endpoints": [],
             "contract": {
+                "input_schema": {
+                    "type": "object",
+                    "required": ["command"],
+                    "properties": {
+                        "command": {"type": "string", "enum": ["pwd", "dir", "ls", "git status", "python --version", "python3 --version"]}
+                    },
+                    "additionalProperties": False,
+                },
+                "output_schema": {
+                    "type": "object",
+                    "required": ["exit_code", "stdout", "stderr"],
+                    "properties": {
+                        "exit_code": {"type": "integer"},
+                        "stdout": {"type": "string"},
+                        "stderr": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
                 "example_input": {"command": "git status"},
                 "example_output": {"exit_code": 0, "stdout": "...", "stderr": ""},
             },
@@ -70,10 +118,34 @@ def build_services(service_token, http_page_port, http_api_port):
                     "target_host": "127.0.0.1",
                     "target_port": http_api_port,
                     "allow_methods": ["GET", "POST"],
+                    "auth": {"access_token_hash": endpoint_token_hash},
                     "description": "Local API server",
                 },
             ],
             "contract": {
+                "input_schema": {
+                    "type": "object",
+                    "required": ["endpoint_id", "method", "path"],
+                    "properties": {
+                        "endpoint_id": {"type": "string", "enum": ["page", "api"]},
+                        "method": {"type": "string", "enum": ["GET", "POST"]},
+                        "path": {"type": "string", "minLength": 1, "maxLength": 2048},
+                        "headers": {"type": "object"},
+                        "body_base64": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
+                "output_schema": {
+                    "type": "object",
+                    "required": ["http_status", "headers", "body_base64"],
+                    "properties": {
+                        "http_status": {"type": "integer"},
+                        "headers": {"type": "object"},
+                        "body_base64": {"type": "string"},
+                        "body_preview": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
                 "example_input": {
                     "endpoint_id": "page",
                     "method": "GET",
@@ -97,7 +169,24 @@ def normalize_service_auth(service, default_service_token):
     return service
 
 
-def load_services_config(path, default_service_token):
+def normalize_endpoint_auth(service, default_endpoint_token):
+    for endpoint in service.get("endpoints", []):
+        if not isinstance(endpoint, dict):
+            continue
+        auth = endpoint.get("auth")
+        if not isinstance(auth, dict):
+            continue
+        if auth.get("access_token_hash"):
+            continue
+        token = auth.pop("access_token", None)
+        if token is None and auth.get("required"):
+            token = default_endpoint_token
+        if token is not None:
+            auth["access_token_hash"] = sha256_text(token)
+    return service
+
+
+def load_services_config(path, default_service_token, default_endpoint_token):
     base_dir = os.path.dirname(os.path.abspath(path))
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -113,6 +202,7 @@ def load_services_config(path, default_service_token):
         handler = service.get("handler")
         if isinstance(handler, dict) and handler.get("path"):
             handler["path"] = os.path.abspath(os.path.join(base_dir, handler["path"]))
+        normalize_endpoint_auth(service, default_endpoint_token)
         normalized.append(normalize_service_auth(service, default_service_token))
     return normalized
 
@@ -285,12 +375,29 @@ def login(sock, role, secret, name):
     resp = recv_msg(sock)
     if resp.get("status") != 200:
         raise RuntimeError(resp.get("message"))
-    auth = make_msg("AUTH", role, payload={"auth_hash": sha256_text(secret)})
+    challenge = resp.get("payload", {}).get("challenge")
+    if not challenge:
+        raise RuntimeError("AUTH_CHALLENGE_MISSING")
+    cipher_key = session_key_from_secret(secret, challenge)
+    auth = make_msg("AUTH", role, payload={"auth_proof": auth_proof(secret, challenge)})
     send_msg(sock, auth)
-    resp = recv_msg(sock)
+    resp = recv_msg(sock, cipher_key=cipher_key)
     if resp.get("status") != 200:
         raise RuntimeError(resp.get("message"))
-    return resp.get("payload", {}).get("token")
+    return resp.get("payload", {}).get("token"), cipher_key
+
+
+def send_locked(sock, msg, cipher_key, send_lock):
+    with send_lock:
+        send_msg(sock, msg, cipher_key=cipher_key)
+
+
+def handle_call_worker(sock, cipher_key, send_lock, services_by_id, custom_handlers, req):
+    resp = handle_call(services_by_id, custom_handlers, req)
+    try:
+        send_locked(sock, resp, cipher_key, send_lock)
+    except OSError:
+        pass
 
 
 def main():
@@ -299,6 +406,7 @@ def main():
     parser.add_argument("--relay-port", type=int, default=9000)
     parser.add_argument("--secret", default="sgp-demo-secret")
     parser.add_argument("--service-token", default=DEFAULT_SERVICE_TOKEN)
+    parser.add_argument("--endpoint-token", default=DEFAULT_ENDPOINT_TOKEN)
     parser.add_argument("--page-port", type=int, default=8000)
     parser.add_argument("--api-port", type=int, default=3000)
     parser.add_argument("--services-config", help="JSON file that defines custom services")
@@ -306,31 +414,36 @@ def main():
     args = parser.parse_args()
 
     if args.services_config:
-        services = load_services_config(args.services_config, args.service_token)
+        services = load_services_config(args.services_config, args.service_token, args.endpoint_token)
     else:
-        services = build_services(args.service_token, args.page_port, args.api_port)
+        services = build_services(args.service_token, args.endpoint_token, args.page_port, args.api_port)
     services_by_id = {item["service_id"]: item for item in services}
     custom_handlers = load_custom_handlers(services)
     sock = socket.create_connection((args.relay_host, args.relay_port), timeout=5)
     sock.settimeout(None)
+    send_lock = threading.Lock()
     try:
-        token = login(sock, "agent", args.secret, args.name)
+        token, cipher_key = login(sock, "agent", args.secret, args.name)
         publish_services = [service_for_publish(service) for service in services]
         publish = make_msg("PUBLISH", "agent", token=token, payload={"services": publish_services})
-        send_msg(sock, publish)
-        resp = recv_msg(sock)
+        send_locked(sock, publish, cipher_key, send_lock)
+        resp = recv_msg(sock, cipher_key=cipher_key)
         if resp.get("status") not in (200, 201):
             raise RuntimeError(resp.get("message"))
         print(f"[agent] published {len(services)} services")
         print("[agent] waiting for CALL requests")
         while True:
-            req = recv_msg(sock)
+            req = recv_msg(sock, cipher_key=cipher_key)
             if req.get("cmd") == "CALL":
-                send_msg(sock, handle_call(services_by_id, custom_handlers, req))
+                threading.Thread(
+                    target=handle_call_worker,
+                    args=(sock, cipher_key, send_lock, services_by_id, custom_handlers, req),
+                    daemon=True,
+                ).start()
             elif req.get("cmd") == "PING":
-                send_msg(sock, make_resp(req, "agent", 200, "PONG"))
+                send_locked(sock, make_resp(req, "agent", 200, "PONG"), cipher_key, send_lock)
             else:
-                send_msg(sock, make_resp(req, "agent", 400, "UNKNOWN_CMD"))
+                send_locked(sock, make_resp(req, "agent", 400, "UNKNOWN_CMD"), cipher_key, send_lock)
     except KeyboardInterrupt:
         print("\n[agent] stopped")
     except Exception as exc:

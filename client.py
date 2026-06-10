@@ -3,44 +3,66 @@ import json
 import socket
 import sys
 
-from protocol import b64_decode, b64_encode, close_quietly, make_msg, recv_msg, send_msg, sha256_text
+from protocol import (
+    b64_decode,
+    b64_encode,
+    auth_proof,
+    close_quietly,
+    endpoint_access_proof,
+    make_msg,
+    recv_msg,
+    send_msg,
+    service_access_proof,
+    session_key_from_secret,
+)
 
 
-def request(sock, msg):
-    send_msg(sock, msg)
-    return recv_msg(sock)
+def request(sock, msg, cipher_key=None):
+    send_msg(sock, msg, cipher_key=cipher_key)
+    return recv_msg(sock, cipher_key=cipher_key)
 
 
 def login(sock, role, secret, name):
     resp = request(sock, make_msg("HELLO", role, payload={"name": name}))
     if resp.get("status") != 200:
         raise RuntimeError(resp.get("message"))
-    resp = request(sock, make_msg("AUTH", role, payload={"auth_hash": sha256_text(secret)}))
+    challenge = resp.get("payload", {}).get("challenge")
+    if not challenge:
+        raise RuntimeError("AUTH_CHALLENGE_MISSING")
+    cipher_key = session_key_from_secret(secret, challenge)
+    send_msg(sock, make_msg("AUTH", role, payload={"auth_proof": auth_proof(secret, challenge)}))
+    resp = recv_msg(sock, cipher_key=cipher_key)
     if resp.get("status") != 200:
         raise RuntimeError(resp.get("message"))
-    return resp.get("payload", {}).get("token")
+    return resp.get("payload", {}).get("token"), cipher_key
 
 
 def print_json(obj):
     print(json.dumps(obj, ensure_ascii=False, indent=2))
 
 
-def list_services(sock, token):
-    resp = request(sock, make_msg("LIST", "client", token=token))
+def list_services(sock, token, cipher_key):
+    resp = request(sock, make_msg("LIST", "client", token=token), cipher_key=cipher_key)
     print_json(resp)
     return resp
 
 
-def call_service(sock, token, service_id, access_token, input_obj):
+def call_service(sock, token, cipher_key, service_id, access_token, input_obj, endpoint_token=None):
+    msg = make_msg(
+        "CALL",
+        "client",
+        token=token,
+        service_id=service_id,
+        payload={"input": input_obj},
+    )
+    msg["payload"]["access_proof"] = service_access_proof(access_token, msg["id"])
+    endpoint_id = input_obj.get("endpoint_id") if isinstance(input_obj, dict) else None
+    if endpoint_token and endpoint_id:
+        msg["payload"]["endpoint_access_proof"] = endpoint_access_proof(endpoint_token, msg["id"], service_id, endpoint_id)
     resp = request(
         sock,
-        make_msg(
-            "CALL",
-            "client",
-            token=token,
-            service_id=service_id,
-            payload={"access_token": access_token, "input": input_obj},
-        ),
+        msg,
+        cipher_key=cipher_key,
     )
     print_json(resp)
     return resp
@@ -57,7 +79,7 @@ def show_http_body(resp):
     print("--- end preview ---")
 
 
-def menu(sock, token, default_service_token):
+def menu(sock, token, cipher_key, default_service_token, default_endpoint_token):
     while True:
         print("\nServiceGate Client")
         print("1. LIST services")
@@ -70,15 +92,18 @@ def menu(sock, token, default_service_token):
         print("0. Exit")
         choice = input("> ").strip()
         if choice == "1":
-            list_services(sock, token)
+            list_services(sock, token, cipher_key)
         elif choice == "2":
             text = input("text: ")
-            call_service(sock, token, "note-box", default_service_token, {"text": text})
+            call_service(sock, token, cipher_key, "note-box", default_service_token, {"text": text})
         elif choice == "3":
             command = input("command (pwd/dir/ls/git status): ").strip()
-            call_service(sock, token, "win-command", default_service_token, {"command": command})
+            call_service(sock, token, cipher_key, "win-command", default_service_token, {"command": command})
         elif choice == "4":
             endpoint_id = input("endpoint (page/api) [page]: ").strip() or "page"
+            endpoint_token = ""
+            if endpoint_id == "api":
+                endpoint_token = input("endpoint access_token [default]: ").strip() or default_endpoint_token
             method = input("method [GET]: ").strip().upper() or "GET"
             path = input("path [/]: ").strip() or "/"
             body = ""
@@ -87,18 +112,21 @@ def menu(sock, token, default_service_token):
             resp = call_service(
                 sock,
                 token,
+                cipher_key,
                 "frontend-workspace",
                 default_service_token,
                 {"endpoint_id": endpoint_id, "method": method, "path": path, "headers": {}, "body_base64": body},
+                endpoint_token=endpoint_token,
             )
             show_http_body(resp)
         elif choice == "5":
-            call_service(sock, token, "note-box", "wrong-token", {"text": "should fail"})
+            call_service(sock, token, cipher_key, "note-box", "wrong-token", {"text": "should fail"})
         elif choice == "6":
-            call_service(sock, token, "missing-service", default_service_token, {"text": "should fail"})
+            call_service(sock, token, cipher_key, "missing-service", default_service_token, {"text": "should fail"})
         elif choice == "7":
             service_id = input("service_id: ").strip()
             access_token = input("access_token [default]: ").strip() or default_service_token
+            endpoint_token = input("endpoint_access_token [optional]: ").strip()
             raw = input("input JSON: ").strip() or "{}"
             try:
                 input_obj = json.loads(raw)
@@ -108,7 +136,7 @@ def menu(sock, token, default_service_token):
             if not isinstance(input_obj, dict):
                 print("input JSON must be an object")
                 continue
-            call_service(sock, token, service_id, access_token, input_obj)
+            call_service(sock, token, cipher_key, service_id, access_token, input_obj, endpoint_token=endpoint_token or None)
         elif choice == "0":
             return
         else:
@@ -121,6 +149,7 @@ def main():
     parser.add_argument("--relay-port", type=int, default=9000)
     parser.add_argument("--secret", default="sgp-demo-secret")
     parser.add_argument("--service-token", default="service-token")
+    parser.add_argument("--endpoint-token", default="endpoint-token")
     parser.add_argument("--name", default=socket.gethostname())
     parser.add_argument("--list", action="store_true", help="list services and exit")
     parser.add_argument("--call", choices=["text", "command", "http", "generic"], help="run one call and exit")
@@ -136,23 +165,25 @@ def main():
     sock = socket.create_connection((args.relay_host, args.relay_port), timeout=5)
     sock.settimeout(None)
     try:
-        token = login(sock, "client", args.secret, args.name)
+        token, cipher_key = login(sock, "client", args.secret, args.name)
         if args.list:
-            list_services(sock, token)
+            list_services(sock, token, cipher_key)
             return
         if args.call == "text":
-            call_service(sock, token, args.service_id or "note-box", args.service_token, {"text": args.text})
+            call_service(sock, token, cipher_key, args.service_id or "note-box", args.service_token, {"text": args.text})
             return
         if args.call == "command":
-            call_service(sock, token, args.service_id or "win-command", args.service_token, {"command": args.command})
+            call_service(sock, token, cipher_key, args.service_id or "win-command", args.service_token, {"command": args.command})
             return
         if args.call == "http":
             resp = call_service(
                 sock,
                 token,
+                cipher_key,
                 args.service_id or "frontend-workspace",
                 args.service_token,
                 {"endpoint_id": args.endpoint, "method": args.method.upper(), "path": args.path, "headers": {}, "body_base64": ""},
+                endpoint_token=args.endpoint_token,
             )
             show_http_body(resp)
             return
@@ -162,9 +193,9 @@ def main():
             input_obj = json.loads(args.input_json)
             if not isinstance(input_obj, dict):
                 raise RuntimeError("--input-json must be a JSON object")
-            call_service(sock, token, args.service_id, args.service_token, input_obj)
+            call_service(sock, token, cipher_key, args.service_id, args.service_token, input_obj, endpoint_token=args.endpoint_token)
             return
-        menu(sock, token, args.service_token)
+        menu(sock, token, cipher_key, args.service_token, args.endpoint_token)
     except KeyboardInterrupt:
         print("\n[client] stopped")
     except Exception as exc:
