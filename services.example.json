@@ -1,0 +1,135 @@
+{
+  "services": [
+    {
+      "service_id": "file-box",
+      "name": "File Box",
+      "service_type": "file.transfer",
+      "description": "A user-defined file transfer service with chunked read/write operations",
+      "auth": {
+        "access_token": "service-token"
+      },
+      "policy": {
+        "max_payload_size": 98304,
+        "timeout_sec": 5,
+        "max_calls_per_minute": 60
+      },
+      "endpoints": [],
+      "contract": {
+        "example_input": {
+          "op": "read_chunk",
+          "path": "hello.txt",
+          "offset": 0,
+          "size": 8192
+        },
+        "example_output": {
+          "path": "hello.txt",
+          "offset": 0,
+          "next_offset": 8192,
+          "eof": false,
+          "data_base64": "..."
+        }
+      },
+      "metadata": {
+        "root_dir": "shared_files",
+        "allow_upload": true
+      },
+      "handler": {
+        "path": "handlers/file_transfer.py",
+        "function": "handle"
+      }
+    },
+    {
+      "service_id": "custom-note",
+      "name": "Custom Note Service",
+      "service_type": "text.echo",
+      "description": "A user-defined text service loaded from services.json",
+      "auth": {
+        "access_token": "service-token"
+      },
+      "policy": {
+        "max_payload_size": 2048,
+        "timeout_sec": 3,
+        "max_calls_per_minute": 30
+      },
+      "endpoints": [],
+      "contract": {
+        "example_input": {
+          "text": "hello custom service"
+        },
+        "example_output": {
+          "reply": "Agent received text"
+        }
+      },
+      "metadata": {}
+    },
+    {
+      "service_id": "custom-command",
+      "name": "Custom Command Service",
+      "service_type": "command.exec",
+      "description": "A user-defined command service with its own whitelist",
+      "auth": {
+        "access_token": "service-token"
+      },
+      "policy": {
+        "max_payload_size": 2048,
+        "timeout_sec": 10,
+        "max_calls_per_minute": 20
+      },
+      "endpoints": [],
+      "contract": {
+        "example_input": {
+          "command": "pwd"
+        },
+        "example_output": {
+          "exit_code": 0,
+          "stdout": "...",
+          "stderr": ""
+        }
+      },
+      "metadata": {
+        "allow_commands": ["pwd", "dir", "ls", "git status"]
+      }
+    },
+    {
+      "service_id": "custom-web",
+      "name": "Custom Web Bundle",
+      "service_type": "http.bundle",
+      "description": "A user-defined HTTP bundle with local endpoints",
+      "auth": {
+        "access_token": "service-token"
+      },
+      "policy": {
+        "max_payload_size": 65536,
+        "timeout_sec": 5,
+        "max_calls_per_minute": 30
+      },
+      "endpoints": [
+        {
+          "endpoint_id": "page",
+          "protocol": "http",
+          "target_host": "127.0.0.1",
+          "target_port": 8000,
+          "allow_methods": ["GET", "POST"],
+          "description": "Custom local page server"
+        }
+      ],
+      "contract": {
+        "example_input": {
+          "endpoint_id": "page",
+          "method": "GET",
+          "path": "/",
+          "headers": {},
+          "body_base64": ""
+        },
+        "example_output": {
+          "http_status": 200,
+          "headers": {
+            "Content-Type": "text/html"
+          },
+          "body_base64": "..."
+        }
+      },
+      "metadata": {}
+    }
+  ]
+}
