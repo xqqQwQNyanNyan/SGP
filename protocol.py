@@ -381,6 +381,8 @@ def recv_msg(sock, cipher_key=None):
         raise ProtocolError(400, "BAD_JSON") from exc
     if msg.get("version") != VERSION:
         raise ProtocolError(426, "VERSION_NOT_SUPPORTED")
+    if msg.get("protocol_version", VERSION) != VERSION:
+        raise ProtocolError(426, "VERSION_NOT_SUPPORTED")
     return msg
 
 
@@ -388,6 +390,7 @@ def make_msg(cmd, role, msg_type="REQ", msg_id=None, token=None, service_id=None
              payload=None, status=None, message=None, ext=None):
     obj = {
         "version": VERSION,
+        "protocol_version": VERSION,
         "type": msg_type,
         "id": msg_id or uuid.uuid4().hex,
         "role": role,

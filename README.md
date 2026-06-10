@@ -31,7 +31,7 @@ SGP 消息使用：
 通用消息字段包括：
 
 ```text
-version, type, id, role, cmd, token, service_id, payload, status, message, ext
+version, protocol_version, type, id, role, cmd, token, service_id, payload, status, message, ext
 ```
 
 核心命令只有：
@@ -70,7 +70,7 @@ Relay 只理解连接角色、登录状态、Service 目录、Service access pro
 ### 1. 启动 Relay
 
 ```bash
-python3 relay.py --host 127.0.0.1 --port 9000
+python3 relay.py --host 127.0.0.1 --port 9000 --log-file relay.log
 ```
 
 Relay 负责接受 Node 连接、维护 Service 目录、校验认证信息，并把 `CALL` 路由到发布对应 Service 的 Node。Relay 还会维护服务租约并向空闲 Agent 发送 `PING` 保活，Agent 失联后会把相关 Service 标记为 offline。

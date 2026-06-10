@@ -7,6 +7,7 @@ import sys
 import threading
 
 from protocol import (
+    VERSION,
     auth_proof,
     close_quietly,
     make_msg,
@@ -301,7 +302,7 @@ def handle_call(services_by_id, custom_handlers, req):
 
 
 def login(sock, role, secret, name):
-    hello = make_msg("HELLO", role, payload={"name": name})
+    hello = make_msg("HELLO", role, payload={"name": name, "protocol_version": VERSION})
     send_msg(sock, hello)
     resp = recv_msg(sock)
     if resp.get("status") != 200:

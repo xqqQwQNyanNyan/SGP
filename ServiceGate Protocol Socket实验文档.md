@@ -12,18 +12,6 @@
 - 如何完成登录、服务发布、服务发现、服务调用和错误返回。
 - 如何把具体服务逻辑放到 handler 中，而不是写死在协议或 Relay 里。
 
-### 2. 程序角色
-
-本实验有三个角色：
-
-| 角色 | 程序 | 作用 |
-| --- | --- | --- |
-| Relay | `relay.py` | 接收 Agent 和 Client 连接，维护服务目录，校验通用权限和 schema，并转发 `CALL` |
-| Agent | `agent.py` | 主动连接 Relay，读取配置文件发布服务，并把调用分发给本地 handler |
-| Client | `client.py` | 登录 Relay，查看服务列表，并调用某个服务 |
-
-Relay 不执行具体业务逻辑。比如文件读取、命令执行、HTTP 转发都在 Agent 端 handler 中完成。
-
 ### 3. 文件结构
 
 | 文件 | 作用 |
@@ -64,10 +52,10 @@ SGP 在 TCP 字节流上增加 24 字节帧头：
 Body 是 JSON，常见字段如下：
 
 ```text
-version, type, id, role, cmd, token, service_id, payload, status, message, ext
+version, protocol_version, type, id, role, cmd, token, service_id, payload, status, message, ext
 ```
 
-其中 `id` 用于匹配请求和响应。
+其中 `version` 和 `protocol_version` 当前均为 `1.0`；`protocol_version` 是显式协议版本字段，`id` 用于匹配请求和响应。
 
 ### 5. 核心命令
 
@@ -134,7 +122,7 @@ cp services.example.json services.json
 三个终端分别运行：
 
 ```bash
-python3 relay.py --host 127.0.0.1 --port 9000
+python3 relay.py --host 127.0.0.1 --port 9000 --log-file relay.log
 python3 agent.py
 python3 client.py
 ```
@@ -256,10 +244,10 @@ Relay 输出一行一个 JSON，例如：
 {"ts":1781090000.140,"component":"relay","event":"call_completed","id":"...","service_id":"file-box","status":200,"message":"OK","duration_ms":17}
 ```
 
-这些日志用于实验观察，不写入文件。需要保存时可以用 shell 重定向：
+Relay 日志会即时输出到终端。需要同时保存到本地文件时使用 `--log-file`：
 
 ```bash
-python3 relay.py --host 127.0.0.1 --port 9000 > relay.log
+python3 relay.py --host 127.0.0.1 --port 9000 --log-file relay.log
 ```
 
 ### 14. 测试建议
@@ -288,7 +276,7 @@ python3 relay.py --host 127.0.0.1 --port 9000 > relay.log
    - 展示 `services.json` 中的 `file-box`、`custom-note`、`custom-command`、`custom-web`，说明具体能力由 handler 提供。
 
 2. 启动 Relay。
-   - 运行 `python3 relay.py --host 127.0.0.1 --port 9000`。
+   - 运行 `python3 relay.py --host 127.0.0.1 --port 9000 --log-file relay.log`。
    - 说明 Relay 只负责登录、服务目录、校验、转发和日志。
    - 让屏幕中能看到 Relay 输出的 JSON 行日志。
 

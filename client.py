@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from protocol import (
+    VERSION,
     b64_decode,
     b64_encode,
     auth_proof,
@@ -34,7 +35,7 @@ def request(sock, msg, cipher_key=None):
 
 
 def login(sock, role, secret, name):
-    resp = request(sock, make_msg("HELLO", role, payload={"name": name}))
+    resp = request(sock, make_msg("HELLO", role, payload={"name": name, "protocol_version": VERSION}))
     if resp.get("status") != 200:
         raise RuntimeError(resp.get("message"))
     challenge = resp.get("payload", {}).get("challenge")

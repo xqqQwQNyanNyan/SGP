@@ -11,6 +11,7 @@ from collections import deque
 from protocol import (
     ProtocolError,
     SchemaValidationError,
+    VERSION,
     close_quietly,
     constant_time_equal,
     make_msg,
@@ -30,11 +31,33 @@ HEARTBEAT_INTERVAL_SEC = 15
 HEARTBEAT_TIMEOUT_SEC = 3
 HEARTBEAT_FAIL_LIMIT = 2
 
+_log_lock = threading.Lock()
+_log_file = None
+
+
+def configure_log_file(path):
+    global _log_file
+    if not path:
+        return
+    _log_file = open(path, "a", encoding="utf-8", buffering=1)
+
 
 def relay_log(event, **fields):
     entry = {"ts": round(time.time(), 3), "component": "relay", "event": event}
     entry.update(fields)
-    print(json.dumps(entry, ensure_ascii=False, separators=(",", ":")))
+    line = json.dumps(entry, ensure_ascii=False, separators=(",", ":"))
+    with _log_lock:
+        print(line, flush=True)
+        if _log_file is not None:
+            _log_file.write(line + "\n")
+            _log_file.flush()
+
+
+def close_log_file():
+    global _log_file
+    if _log_file is not None:
+        _log_file.close()
+        _log_file = None
 
 
 class AgentChannel:
@@ -469,6 +492,7 @@ def handle_connection(state, conn, addr):
                             "HELLO_OK",
                             {
                                 "role": role,
+                                "protocol_version": VERSION,
                                 "auth_method": "sha256-challenge-v1",
                                 "challenge": auth_challenge,
                                 "session_ttl_sec": SESSION_TTL_SEC,
@@ -574,7 +598,9 @@ def main():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=9000)
     parser.add_argument("--secret", default="sgp-demo-secret")
+    parser.add_argument("--log-file", help="append relay JSON logs to this file while still printing to stdout")
     args = parser.parse_args()
+    configure_log_file(args.log_file)
 
     state = RelayState(args.secret)
     threading.Thread(target=heartbeat_monitor, args=(state,), daemon=True).start()
@@ -582,15 +608,16 @@ def main():
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((args.host, args.port))
     server.listen()
-    print(f"[relay] listening on {args.host}:{args.port}")
+    relay_log("listening", host=args.host, port=args.port, protocol_version=VERSION, log_file=args.log_file or "")
     try:
         while True:
             conn, addr = server.accept()
             threading.Thread(target=handle_connection, args=(state, conn, addr), daemon=True).start()
     except KeyboardInterrupt:
-        print("\n[relay] stopped")
+        relay_log("stopped")
     finally:
         close_quietly(server)
+        close_log_file()
 
 
 if __name__ == "__main__":
