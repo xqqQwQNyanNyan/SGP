@@ -90,7 +90,11 @@
           "reply": "Agent received text"
         }
       },
-      "metadata": {}
+      "metadata": {},
+      "handler": {
+        "path": "handlers/text_echo.py",
+        "function": "handle"
+      }
     },
     {
       "service_id": "custom-command",
@@ -136,6 +140,10 @@
       },
       "metadata": {
         "allow_commands": ["pwd", "dir", "ls", "git status"]
+      },
+      "handler": {
+        "path": "handlers/command_exec.py",
+        "function": "handle"
       }
     },
     {
@@ -203,7 +211,11 @@
           "body_base64": "..."
         }
       },
-      "metadata": {}
+      "metadata": {},
+      "handler": {
+        "path": "handlers/http_bundle.py",
+        "function": "handle"
+      }
     }
   ]
 }

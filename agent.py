@@ -20,6 +20,15 @@ from protocol import (
 
 DEFAULT_SERVICE_TOKEN = "service-token"
 DEFAULT_ENDPOINT_TOKEN = "endpoint-token"
+DEFAULT_AGENT_CONFIG_PATH = "agent.config.json"
+DEFAULTS = {
+    "relay_host": "127.0.0.1",
+    "relay_port": 9000,
+    "secret": "sgp-demo-secret",
+    "service_token": DEFAULT_SERVICE_TOKEN,
+    "endpoint_token": DEFAULT_ENDPOINT_TOKEN,
+    "services_config": None,
+}
 
 
 def builtin_handler_path(filename):
@@ -208,6 +217,25 @@ def load_services_config(path, default_service_token, default_endpoint_token):
     return normalized
 
 
+def load_agent_config(path):
+    if not path or not os.path.exists(path):
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError("agent config must be an object")
+    return data
+
+
+def apply_agent_config(args):
+    config = load_agent_config(args.config)
+    for key, default in DEFAULTS.items():
+        value = getattr(args, key)
+        if value is None:
+            setattr(args, key, config.get(key, default))
+    return args
+
+
 def service_for_publish(service):
     published = dict(service)
     published.pop("handler", None)
@@ -308,21 +336,24 @@ def handle_call_worker(sock, cipher_key, send_lock, services_by_id, custom_handl
 
 def main():
     parser = argparse.ArgumentParser(description="ServiceGate Protocol agent")
-    parser.add_argument("--relay-host", default="127.0.0.1")
-    parser.add_argument("--relay-port", type=int, default=9000)
-    parser.add_argument("--secret", default="sgp-demo-secret")
-    parser.add_argument("--service-token", default=DEFAULT_SERVICE_TOKEN)
-    parser.add_argument("--endpoint-token", default=DEFAULT_ENDPOINT_TOKEN)
+    parser.add_argument("--config", default=DEFAULT_AGENT_CONFIG_PATH, help="agent config file")
+    parser.add_argument("--relay-host")
+    parser.add_argument("--relay-port", type=int)
+    parser.add_argument("--secret")
+    parser.add_argument("--service-token")
+    parser.add_argument("--endpoint-token")
     parser.add_argument("--page-port", type=int, default=8000)
     parser.add_argument("--api-port", type=int, default=3000)
     parser.add_argument("--services-config", help="JSON file that defines custom services")
     parser.add_argument("--name", default=socket.gethostname())
     args = parser.parse_args()
+    args = apply_agent_config(args)
 
     if args.services_config:
         services = load_services_config(args.services_config, args.service_token, args.endpoint_token)
     else:
-        services = build_services(args.service_token, args.endpoint_token, args.page_port, args.api_port)
+        services = []
+        print("[agent] no services_config set; publishing 0 services")
     services_by_id = {item["service_id"]: item for item in services}
     custom_handlers = load_custom_handlers(services)
     sock = socket.create_connection((args.relay_host, args.relay_port), timeout=5)

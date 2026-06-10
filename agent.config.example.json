@@ -1,0 +1,8 @@
+{
+  "relay_host": "81.70.233.96",
+  "relay_port": 9000,
+  "secret": "demo_secret",
+  "service_token": "service-token",
+  "endpoint_token": "endpoint-token",
+  "services_config": "services.json"
+}

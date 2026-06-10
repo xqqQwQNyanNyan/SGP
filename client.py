@@ -154,6 +154,31 @@ def print_call_result(resp, show_http_preview=True):
     if isinstance(output, dict) and set(output.keys()) == {"reply"}:
         print(output.get("reply", ""))
         return
+    if isinstance(output, dict) and "entries" in output:
+        entries = output.get("entries", [])
+        print(f"path: {output.get('path', '.')}")
+        if not entries:
+            print("(empty)")
+            return
+        for item in entries:
+            kind = "dir " if item.get("is_dir") else "file"
+            print(f"{kind:4} {str(item.get('size', '-')).rjust(8)}  {item.get('name')}")
+        return
+    if isinstance(output, dict) and {"path", "is_dir", "size"} <= set(output.keys()):
+        kind = "dir" if output.get("is_dir") else "file"
+        print(f"{output.get('path')}  {kind}  {output.get('size')} bytes")
+        return
+    if isinstance(output, dict) and "data_base64" in output:
+        data = b64_decode(output.get("data_base64", ""))
+        print(f"path: {output.get('path')}")
+        print(f"offset: {output.get('offset')}  next: {output.get('next_offset')}  size: {output.get('size')}  eof: {output.get('eof')}")
+        print("\n--- data preview ---")
+        print(data[:2000].decode("utf-8", errors="replace"))
+        print("--- end preview ---")
+        return
+    if isinstance(output, dict) and "written" in output:
+        print(f"wrote {output.get('written')} bytes to {output.get('path')} (size: {output.get('size')})")
+        return
     if isinstance(output, dict) and "body_base64" in output:
         http_status = output.get("http_status")
         if http_status:
@@ -243,15 +268,82 @@ def find_service(services, service_type=None, service_id=None):
     return None
 
 
+def find_service_by_name(services, name):
+    for service in services:
+        if service.get("service_id") == name or service.get("service_type") == name:
+            return service
+    return None
+
+
+def print_service_help(service):
+    service_id = service.get("service_id")
+    service_type = service.get("service_type")
+    print(f"{service_id} ({service_type})")
+    if service.get("description"):
+        print(service.get("description"))
+
+    if service_type == "text.echo":
+        print("\n用法:")
+        print(f"  text hello")
+        print(f"  generic {service_id} '{{\"text\":\"hello\"}}'")
+        return
+
+    if service_type == "command.exec":
+        allowed = service.get("metadata", {}).get("allow_commands", [])
+        print("\n用法:")
+        print("  cmd pwd")
+        print(f"  generic {service_id} '{{\"command\":\"pwd\"}}'")
+        if allowed:
+            print("\n允许的命令:")
+            for item in allowed:
+                print(f"  {item}")
+        return
+
+    if service_type == "http.bundle":
+        print("\n用法:")
+        print("  http /")
+        print(f"  generic {service_id} '{{\"endpoint_id\":\"page\",\"method\":\"GET\",\"path\":\"/\",\"headers\":{{}},\"body_base64\":\"\"}}'")
+        endpoints = service.get("endpoints", [])
+        if endpoints:
+            print("\nEndpoints:")
+            for endpoint in endpoints:
+                auth = " auth" if endpoint.get("auth_required") else ""
+                methods = ",".join(endpoint.get("allow_methods", [])) or "-"
+                print(f"  {endpoint.get('endpoint_id')} [{methods}{auth}] {endpoint.get('description', '')}")
+        return
+
+    if service_type == "file.transfer":
+        print("\n用法:")
+        print("  file ls [path]")
+        print("  file stat <path>")
+        print("  file read <path> [offset] [size]")
+        print("  file write <path> <text>")
+        print(f"  generic {service_id} '{{\"op\":\"list\",\"path\":\".\"}}'")
+        return
+
+    print("\n通用调用:")
+    print(f"  generic {service_id} '<JSON input>'")
+    contract = service.get("contract", {})
+    example = contract.get("example_input")
+    if example is not None:
+        print("\n示例 input:")
+        print_json(example)
+
+
 def print_shell_help():
     print(
         """
 可用命令：
   list                         刷新并显示服务列表
+  help <service_id>            查看某个服务怎么用
   call                         从服务列表选择一个服务并调用
   text <内容>                  调用第一个 text.echo 服务
   cmd <命令>                   调用第一个 command.exec 服务
   http [路径]                  调用第一个 http.bundle 的 page endpoint
+  file ls [path]               列出 file.transfer 目录
+  file stat <path>             查看 file.transfer 文件信息
+  file read <path> [offset]    读取 file.transfer 文件块
+  file write <path> <text>     写入 file.transfer 文件
   generic <service_id> <JSON>  通用 JSON 调用
   config                       显示当前配置文件和连接配置
   set service-token <token>    修改当前会话的 Service token
@@ -342,6 +434,48 @@ def refresh_services(sock, token, cipher_key, raw_json=False, quiet=False):
     return services_from_response(resp)
 
 
+def ensure_services(services, sock, token, cipher_key, raw_json):
+    if services:
+        return services
+    return refresh_services(sock, token, cipher_key, raw_json=raw_json, quiet=True)
+
+
+def call_file_service(sock, token, cipher_key, service, service_token, args, raw_json=False):
+    if not args:
+        print("用法: file ls/stat/read/write ...，或 help <file-service-id>")
+        return
+    op = args[0]
+    if op in ("ls", "list"):
+        input_obj = {"op": "list", "path": args[1] if len(args) > 1 else "."}
+    elif op == "stat":
+        if len(args) < 2:
+            print("用法: file stat <path>")
+            return
+        input_obj = {"op": "stat", "path": args[1]}
+    elif op == "read":
+        if len(args) < 2:
+            print("用法: file read <path> [offset] [size]")
+            return
+        input_obj = {"op": "read_chunk", "path": args[1]}
+        try:
+            if len(args) > 2:
+                input_obj["offset"] = int(args[2])
+            if len(args) > 3:
+                input_obj["size"] = int(args[3])
+        except ValueError:
+            print("offset 和 size 必须是数字")
+            return
+    elif op == "write":
+        if len(args) < 3:
+            print("用法: file write <path> <text>")
+            return
+        input_obj = {"op": "write_chunk", "path": args[1], "offset": 0, "data_base64": b64_encode(" ".join(args[2:]))}
+    else:
+        print("未知 file 操作。可用: ls, stat, read, write")
+        return
+    call_service(sock, token, cipher_key, service.get("service_id"), service_token, input_obj, raw_json=raw_json)
+
+
 def mask_secret(value):
     if not value:
         return ""
@@ -380,7 +514,15 @@ def menu(sock, token, cipher_key, settings, raw_json=False):
         if command in ("quit", "exit", "q", "0"):
             return
         if command in ("help", "h", "?"):
-            print_shell_help()
+            if args:
+                services = ensure_services(services, sock, token, cipher_key, current_raw_json)
+                service = find_service_by_name(services, args[0])
+                if service:
+                    print_service_help(service)
+                else:
+                    print(f"没有找到服务: {args[0]}")
+            else:
+                print_shell_help()
             continue
         if command == "config":
             print_config(settings)
@@ -410,8 +552,7 @@ def menu(sock, token, cipher_key, settings, raw_json=False):
             print(f"原始 JSON 输出已{'开启' if current_raw_json else '关闭'}")
             continue
 
-        if not services:
-            services = refresh_services(sock, token, cipher_key, raw_json=current_raw_json, quiet=True)
+        services = ensure_services(services, sock, token, cipher_key, current_raw_json)
 
         if command == "call":
             service = choose_service(services)
@@ -449,6 +590,13 @@ def menu(sock, token, cipher_key, settings, raw_json=False):
                 {"endpoint_id": "page", "method": "GET", "path": path, "headers": {}, "body_base64": ""},
                 raw_json=current_raw_json,
             )
+            continue
+        if command == "file":
+            service = find_service(services, service_type="file.transfer")
+            if not service:
+                print("没有 file.transfer 服务。")
+                continue
+            call_file_service(sock, token, cipher_key, service, settings["service_token"], args, raw_json=current_raw_json)
             continue
         if command == "generic":
             if len(args) < 2:
