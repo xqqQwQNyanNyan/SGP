@@ -31,6 +31,12 @@ HEARTBEAT_TIMEOUT_SEC = 3
 HEARTBEAT_FAIL_LIMIT = 2
 
 
+def relay_log(event, **fields):
+    entry = {"ts": round(time.time(), 3), "component": "relay", "event": event}
+    entry.update(fields)
+    print(json.dumps(entry, ensure_ascii=False, separators=(",", ":")))
+
+
 class AgentChannel:
     def __init__(self, state, conn, cipher_key):
         self.state = state
@@ -319,39 +325,53 @@ def find_endpoint(service, endpoint_id):
 
 
 def handle_client_call(state, req):
+    service_id = req.get("service_id")
+    started_at = time.time()
+    relay_log("call_received", id=req.get("id"), service_id=service_id)
     token = req.get("token")
     if not state.check_session(token, "client"):
-        return make_resp(req, "relay", 401, "UNAUTHORIZED")
+        resp = make_resp(req, "relay", 401, "UNAUTHORIZED")
+        relay_log("call_rejected", id=req.get("id"), service_id=service_id, status=401, message="UNAUTHORIZED")
+        return resp
 
-    service_id = req.get("service_id")
     item = state.get_service(service_id)
     if not item:
-        return make_resp(req, "relay", 404, "SERVICE_NOT_FOUND")
+        resp = make_resp(req, "relay", 404, "SERVICE_NOT_FOUND")
+        relay_log("call_rejected", id=req.get("id"), service_id=service_id, status=404, message="SERVICE_NOT_FOUND")
+        return resp
     if not item.get("online") or item.get("conn") is None:
-        return make_resp(req, "relay", 503, "AGENT_OFFLINE")
+        resp = make_resp(req, "relay", 503, "AGENT_OFFLINE")
+        relay_log("call_rejected", id=req.get("id"), service_id=service_id, status=503, message="AGENT_OFFLINE")
+        return resp
 
     service = item["service"]
     access_proof = req.get("payload", {}).get("access_proof", "")
     expected_hash = service.get("auth", {}).get("access_token_hash", "")
     if not state.validate_service_proof(access_proof, req.get("id"), expected_hash):
-        return make_resp(req, "relay", 403, "SERVICE_TOKEN_INVALID")
+        resp = make_resp(req, "relay", 403, "SERVICE_TOKEN_INVALID")
+        relay_log("call_rejected", id=req.get("id"), service_id=service_id, status=403, message="SERVICE_TOKEN_INVALID")
+        return resp
 
     max_payload = int(service.get("policy", {}).get("max_payload_size", 65536))
     input_obj = req.get("payload", {}).get("input", {})
     if payload_size(input_obj) > max_payload:
-        return make_resp(req, "relay", 413, "PAYLOAD_TOO_LARGE")
+        resp = make_resp(req, "relay", 413, "PAYLOAD_TOO_LARGE")
+        relay_log("call_rejected", id=req.get("id"), service_id=service_id, status=413, message="PAYLOAD_TOO_LARGE")
+        return resp
     input_schema = service.get("contract", {}).get("input_schema")
     if input_schema:
         try:
             validate_schema(input_obj, input_schema)
         except SchemaValidationError as exc:
-            return make_resp(
+            resp = make_resp(
                 req,
                 "relay",
                 400,
                 "SCHEMA_VALIDATION_FAILED",
                 {"schema_error": exc.to_detail()},
             )
+            relay_log("call_rejected", id=req.get("id"), service_id=service_id, status=400, message="SCHEMA_VALIDATION_FAILED")
+            return resp
     endpoint_id = input_obj.get("endpoint_id")
     endpoint = find_endpoint(service, endpoint_id)
     endpoint_hash = ""
@@ -360,15 +380,19 @@ def handle_client_call(state, req):
     if endpoint_hash:
         endpoint_proof = req.get("payload", {}).get("endpoint_access_proof", "")
         if not state.validate_endpoint_proof(endpoint_proof, req.get("id"), service_id, endpoint_id, endpoint_hash):
-            return make_resp(
+            resp = make_resp(
                 req,
                 "relay",
                 403,
                 "ENDPOINT_TOKEN_INVALID",
                 {"endpoint_id": endpoint_id},
             )
+            relay_log("call_rejected", id=req.get("id"), service_id=service_id, status=403, message="ENDPOINT_TOKEN_INVALID")
+            return resp
     if not check_rate_limit(item):
-        return make_resp(req, "relay", 429, "TOO_MANY_REQUESTS")
+        resp = make_resp(req, "relay", 429, "TOO_MANY_REQUESTS")
+        relay_log("call_rejected", id=req.get("id"), service_id=service_id, status=429, message="TOO_MANY_REQUESTS")
+        return resp
 
     timeout = float(service.get("policy", {}).get("timeout_sec", 5))
     agent_req = make_msg(
@@ -382,25 +406,42 @@ def handle_client_call(state, req):
     conn = item.get("conn")
     channel = item.get("channel")
     if conn is None or channel is None:
-        return make_resp(req, "relay", 503, "AGENT_OFFLINE")
+        resp = make_resp(req, "relay", 503, "AGENT_OFFLINE")
+        relay_log("call_rejected", id=req.get("id"), service_id=service_id, status=503, message="AGENT_OFFLINE")
+        return resp
     try:
         agent_resp = channel.request(agent_req, timeout)
         state.touch_conn(conn)
     except socket.timeout:
-        return make_resp(req, "relay", 408, "CALL_TIMEOUT")
+        resp = make_resp(req, "relay", 408, "CALL_TIMEOUT")
+        relay_log("call_failed", id=req.get("id"), service_id=service_id, status=408, message="CALL_TIMEOUT")
+        return resp
     except (EOFError, OSError):
         state.mark_conn_offline(conn, "offline")
-        return make_resp(req, "relay", 503, "AGENT_OFFLINE")
+        resp = make_resp(req, "relay", 503, "AGENT_OFFLINE")
+        relay_log("call_failed", id=req.get("id"), service_id=service_id, status=503, message="AGENT_OFFLINE")
+        return resp
     except ProtocolError as exc:
-        return make_resp(req, "relay", exc.status, exc.message)
+        resp = make_resp(req, "relay", exc.status, exc.message)
+        relay_log("call_failed", id=req.get("id"), service_id=service_id, status=exc.status, message=exc.message)
+        return resp
 
-    return make_resp(
+    resp = make_resp(
         req,
         "relay",
         agent_resp.get("status", 502),
         agent_resp.get("message", "AGENT_ERROR"),
         payload=agent_resp.get("payload", {}),
     )
+    relay_log(
+        "call_completed",
+        id=req.get("id"),
+        service_id=service_id,
+        status=resp.get("status"),
+        message=resp.get("message"),
+        duration_ms=int((time.time() - started_at) * 1000),
+    )
+    return resp
 
 
 def handle_connection(state, conn, addr):
@@ -408,7 +449,7 @@ def handle_connection(state, conn, addr):
     token = None
     auth_challenge = None
     cipher_key = None
-    print(f"[relay] connected {addr}")
+    relay_log("connection_open", peer=f"{addr[0]}:{addr[1]}")
     try:
         while True:
             req = recv_msg(conn, cipher_key=cipher_key)
@@ -440,6 +481,7 @@ def handle_connection(state, conn, addr):
                     send_msg(conn, make_resp(req, "relay", 400, "BAD_AUTH_FLOW"))
                 elif not state.validate_auth_proof(auth_challenge, proof):
                     send_msg(conn, make_resp(req, "relay", 401, "AUTH_FAILED"))
+                    relay_log("auth_failed", peer=f"{addr[0]}:{addr[1]}", role=role)
                 else:
                     cipher_key = session_key_from_secret_hash(state.shared_secret_hash, auth_challenge)
                     token = state.new_session(role, conn, cipher_key)
@@ -449,6 +491,7 @@ def handle_connection(state, conn, addr):
                         make_resp(req, "relay", 200, "AUTH_OK", {"token": token, "expires_in": SESSION_TTL_SEC}),
                         cipher_key=cipher_key,
                     )
+                    relay_log("auth_ok", peer=f"{addr[0]}:{addr[1]}", role=role)
             elif cmd == "PUBLISH":
                 if not state.check_session(req.get("token"), "agent"):
                     send_msg(conn, make_resp(req, "relay", 401, "UNAUTHORIZED"), cipher_key=cipher_key)
@@ -458,7 +501,7 @@ def handle_connection(state, conn, addr):
                 state.attach_channel(req.get("token"), channel)
                 state.publish(services, conn, req.get("token"))
                 channel.start()
-                print(f"[relay] published {len(services)} services")
+                relay_log("publish", peer=f"{addr[0]}:{addr[1]}", count=len(services), service_ids=[s.get("service_id") for s in services])
                 send_msg(
                     conn,
                     make_resp(
@@ -480,12 +523,15 @@ def handle_connection(state, conn, addr):
             elif cmd == "LIST":
                 if not state.check_session(req.get("token"), "client"):
                     send_msg(conn, make_resp(req, "relay", 401, "UNAUTHORIZED"), cipher_key=cipher_key)
+                    relay_log("list_rejected", peer=f"{addr[0]}:{addr[1]}", status=401, message="UNAUTHORIZED")
                 else:
+                    services = state.list_public_services()
                     send_msg(
                         conn,
-                        make_resp(req, "relay", 200, "OK", {"services": state.list_public_services()}),
+                        make_resp(req, "relay", 200, "OK", {"services": services}),
                         cipher_key=cipher_key,
                     )
+                    relay_log("list", peer=f"{addr[0]}:{addr[1]}", count=len(services))
             elif cmd == "CALL":
                 send_msg(conn, handle_client_call(state, req), cipher_key=cipher_key)
             elif cmd == "PING":
@@ -495,11 +541,11 @@ def handle_connection(state, conn, addr):
     except EOFError:
         pass
     except Exception as exc:
-        print(f"[relay] connection error {addr}: {exc}")
+        relay_log("connection_error", peer=f"{addr[0]}:{addr[1]}", error=str(exc))
     finally:
         state.remove_conn(conn)
         close_quietly(conn)
-        print(f"[relay] disconnected {addr}")
+        relay_log("connection_close", peer=f"{addr[0]}:{addr[1]}")
 
 
 def heartbeat_monitor(state):

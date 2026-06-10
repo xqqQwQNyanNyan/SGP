@@ -4,194 +4,114 @@
 
 ### 1. 实验目的
 
-本实验使用 Python 标准库 `socket` 实现一个简单的应用层协议 ServiceGate Protocol（SGP）。主要目的如下：
+本实验使用 Python 标准库 `socket` 实现一个小型应用层协议 ServiceGate Protocol（SGP）。实验重点不是做一个生产可用的远程调用平台，而是把 TCP 字节流上的几个基本问题做完整：
 
-- 练习 TCP socket 编程，理解 TCP 是字节流，需要应用层自己处理消息边界。
-- 设计一个有固定帧头和 JSON 消息体的应用层协议。
-- 实现一个中继 Relay、一个服务发布端 Agent、一个服务调用端 Client。
-- 演示认证、服务发布、服务发现、服务调用和几种错误处理情况。
+- 如何在 TCP 上划分消息边界。
+- 如何设计固定帧头和 JSON 消息体。
+- 如何让 Client、Relay、Agent 三类程序协同工作。
+- 如何完成登录、服务发布、服务发现、服务调用和错误返回。
+- 如何把具体服务逻辑放到 handler 中，而不是写死在协议或 Relay 里。
 
-### 2. 应用场景
+### 2. 程序角色
 
-实验假设有两台设备：
+本实验有三个角色：
 
-- 一台内网中的主机运行 Agent，发布本机可用服务。
-- 另一台设备运行 Client，通过 Relay 查看服务并发起调用。
+| 角色 | 程序 | 作用 |
+| --- | --- | --- |
+| Relay | `relay.py` | 接收 Agent 和 Client 连接，维护服务目录，校验通用权限和 schema，并转发 `CALL` |
+| Agent | `agent.py` | 主动连接 Relay，读取配置文件发布服务，并把调用分发给本地 handler |
+| Client | `client.py` | 登录 Relay，查看服务列表，并调用某个服务 |
 
-这样设计主要是为了模拟“内网机器主动连出，中继服务器负责转发”的场景。实验中默认在本机用多个终端模拟这三类程序。
+Relay 不执行具体业务逻辑。比如文件读取、命令执行、HTTP 转发都在 Agent 端 handler 中完成。
 
-### 3. 程序结构
+### 3. 文件结构
 
 | 文件 | 作用 |
 | --- | --- |
-| `protocol.py` | 负责帧头编码/解码、JSON 收发、认证 proof、简单加密、schema 校验和响应构造 |
-| `relay.py` | 中继服务器，维护登录 session、服务列表、调用转发、保活状态 |
-| `agent.py` | 服务发布端，登录 Relay 后发布示例服务，并处理 Relay 转发来的 `CALL` |
-| `client.py` | 服务调用端，登录 Relay 后执行 `LIST` 或 `CALL` |
-| `services.example.json` | 自定义服务配置示例 |
-| `handlers/file_transfer.py` | 自定义文件服务 handler 示例 |
+| `protocol.py` | 帧头编码/解码、消息收发、认证 proof、简化加密、schema 校验和响应构造 |
+| `relay.py` | 中继服务，负责登录、服务目录、权限校验、schema 校验、转发和日志 |
+| `agent.py` | 服务发布端，读取 `agent.config.json` 和 `services.json`，加载 handler |
+| `client.py` | 交互式客户端，支持 `list`、`help <service>`、`text`、`cmd`、`http`、`file` 等命令 |
+| `agent.config.example.json` | Agent 配置示例 |
+| `client.config.example.json` | Client 配置示例 |
+| `services.example.json` | Service 配置示例 |
+| `handlers/text_echo.py` | 文本回显 handler |
+| `handlers/command_exec.py` | 白名单命令 handler |
+| `handlers/http_bundle.py` | HTTP 转发 handler |
+| `handlers/file_transfer.py` | 受限文件访问 handler |
 
 ### 4. 协议帧格式
 
-SGP 在 TCP 字节流上增加固定 24 字节帧头：
+SGP 在 TCP 字节流上增加 24 字节帧头：
 
 ```text
 24 字节 Frame Header + Body
 ```
 
-帧头字段如下：
+帧头字段：
 
 | 字段 | 说明 |
 | --- | --- |
-| `magic` | 固定为 `SGP1`，用于识别协议帧 |
+| `magic` | 固定为 `SGP1` |
 | `major/minor` | 帧格式版本 |
 | `header_len` | 当前为 24 |
-| `body_type` | `1` 为 JSON，`2` 为认证后的加密 JSON |
+| `body_type` | `1` 表示 JSON，`2` 表示认证后的加密 JSON |
 | `flags/reserved` | 预留字段 |
-| `body_len` | body 字节长度，用于处理粘包和半包 |
+| `body_len` | body 字节长度，用于处理 TCP 粘包和半包 |
 | `seq` | 帧序号，主要用于调试 |
-| `header_crc32` | 帧头校验 |
+| `header_crc32` | 帧头 CRC32 校验 |
 
-Body 使用 JSON，常见字段包括：
+Body 是 JSON，常见字段如下：
 
 ```text
 version, type, id, role, cmd, token, service_id, payload, status, message, ext
 ```
 
-其中 `id` 用来匹配请求和响应。
+其中 `id` 用于匹配请求和响应。
 
 ### 5. 核心命令
 
 | 命令 | 用途 |
 | --- | --- |
 | `HELLO` | 连接后声明角色，Relay 返回 challenge |
-| `AUTH` | 使用共享密钥派生的 proof 登录 |
+| `AUTH` | 使用共享密钥和 challenge 生成 proof 完成登录 |
 | `PUBLISH` | Agent 发布服务列表 |
 | `LIST` | Client 查询服务列表 |
-| `CALL` | Client 调用某个服务 |
-| `PING` | 保活 |
+| `CALL` | Client 调用服务 |
+| `PING` | Relay 和 Agent 间的保活 |
 
-### 6. 服务模型
+协议层命令只有这些。`text.echo`、`command.exec`、`http.bundle`、`file.transfer` 都是服务类型，不是协议命令。
 
-Agent 发布的每个服务包含这些信息：
+### 6. 服务配置
+
+Agent 不再默认发布服务。要发布什么服务，由 `agent.config.json` 中的 `services_config` 指向的 JSON 文件决定。
+
+一个服务通常包含：
 
 | 字段 | 说明 |
 | --- | --- |
-| `service_id` | 服务编号 |
-| `service_type` | 服务类型，例如 `text.echo`、`command.exec`、`http.bundle` |
-| `auth` | 服务级访问 token 的哈希 |
+| `service_id` | 服务编号，例如 `file-box` |
+| `service_type` | 服务类型，例如 `file.transfer` |
+| `auth` | 服务访问 token 或 token hash |
 | `policy` | payload 大小、超时、调用频率等限制 |
-| `endpoints` | 可选，HTTP 服务中用于表示不同入口 |
-| `contract` | 输入输出 schema 和示例 |
-| `metadata` | 服务实现需要的本地配置 |
+| `endpoints` | HTTP 类服务的 endpoint 配置 |
+| `contract` | 输入 schema、输出 schema 和示例 |
+| `metadata` | handler 需要的本地配置 |
+| `handler` | Agent 本地 Python handler 文件和函数 |
 
-目前内置了三个服务：
-
-| Service | 作用 |
-| --- | --- |
-| `note-box` | 回显短文本 |
-| `win-command` | 执行白名单命令 |
-| `frontend-workspace` | 访问本机 HTTP endpoint |
-
-### 7. 已实现功能
-
-本实验原型实现了以下功能：
-
-- 固定帧头，能处理 TCP 粘包/半包。
-- `HELLO -> AUTH` 登录流程。
-- 认证成功后发放 session token。
-- 认证后消息体加密，抓包时不直接看到 JSON 明文。
-- Agent 通过 `PUBLISH` 发布服务。
-- Client 通过 `LIST` 查询服务。
-- Client 通过 `CALL` 调用服务。
-- Service 级 access proof。
-- HTTP endpoint 可选 endpoint 级 access proof。
-- Service `contract.input_schema` 校验。
-- payload 大小限制、调用频率限制、调用超时。
-- Agent 断开后服务标记为 offline。
-- Relay 对空闲 Agent 发送 `PING` 保活。
-- 多个 Client 可以同时发起调用；同一 Agent 连接上用消息 `id` 匹配并发响应。
-
-这些功能主要是为了实验展示，不代表已经达到生产环境安全或稳定性要求。
-
-### 8. 基本交互流程
-
-Agent 上线：
-
-```text
-Agent -> Relay: TCP connect
-Agent -> Relay: HELLO(role=agent)
-Relay -> Agent: HELLO_OK(challenge)
-Agent -> Relay: AUTH(auth_proof)
-Relay -> Agent: AUTH_OK(token)
-Agent -> Relay: PUBLISH(services)
-Relay -> Agent: PUBLISH_OK
-```
-
-Client 查询服务：
-
-```text
-Client -> Relay: TCP connect
-Client -> Relay: HELLO(role=client)
-Relay -> Client: HELLO_OK(challenge)
-Client -> Relay: AUTH(auth_proof)
-Relay -> Client: AUTH_OK(token)
-Client -> Relay: LIST
-Relay -> Client: services[]
-```
-
-Client 调用服务：
-
-```text
-Client -> Relay: CALL(service_id, access_proof, input)
-Relay: 校验 session、service_id、token proof、schema、policy、在线状态
-Relay -> Agent: CALL(service_id, input)
-Agent -> Relay: CALL result
-Relay -> Client: CALL result
-```
-
-### 9. 运行方法
-
-在三个终端中分别运行：
-
-```bash
-python3 relay.py --host 127.0.0.1 --port 9000
-python3 agent.py --relay-host 127.0.0.1 --relay-port 9000
-python3 client.py --relay-host 127.0.0.1 --relay-port 9000
-```
-
-也可以使用非交互命令：
-
-| 目的 | 命令 |
-| --- | --- |
-| 查询服务列表 | `python3 client.py --list` |
-| 调用文本服务 | `python3 client.py --call text --text "hello"` |
-| 调用命令服务 | `python3 client.py --call command --command "pwd"` |
-| 调用 HTTP page endpoint | `python3 client.py --call http --endpoint page --path /` |
-| 调用 HTTP api endpoint | `python3 client.py --call http --endpoint api --endpoint-token endpoint-token --path /` |
-| 错误 Service token | `python3 client.py --call text --service-token wrong-token --text "fail"` |
-| 不存在的服务 | `python3 client.py --call text --service-id missing-service --text "fail"` |
-
-如果要测试 HTTP 服务，可以先启动：
-
-```bash
-python3 -m http.server 8000
-python3 -m http.server 3000
-```
-
-### 10. 扩展服务
-
-可以复制示例配置：
-
-```bash
-cp services.example.json services.json
-python3 agent.py --relay-host 127.0.0.1 --relay-port 9000 --services-config services.json
-```
-
-`services.example.json` 中包含一个 `file.transfer` 示例。它通过 `handler` 指定本地 Python 文件：
+示例：
 
 ```json
 {
+  "service_id": "file-box",
+  "service_type": "file.transfer",
+  "auth": {
+    "access_token": "service-token"
+  },
+  "metadata": {
+    "root_dir": "shared_files",
+    "allow_upload": true
+  },
   "handler": {
     "path": "handlers/file_transfer.py",
     "function": "handle"
@@ -199,28 +119,107 @@ python3 agent.py --relay-host 127.0.0.1 --relay-port 9000 --services-config serv
 }
 ```
 
-Relay 不执行 handler，也不理解文件服务细节，只负责检查通用认证、schema、policy，然后把调用转发给 Agent。
+Relay 会过滤 `auth` 和 `handler`，Client 在 `LIST` 里看不到这些敏感字段。
 
-### 11. 测试情况
+### 7. 运行方法
 
-本实验中主要测试了以下情况：
+准备配置：
 
-| 编号 | 测试内容 | 预期现象 |
-| --- | --- | --- |
-| T1 | Relay、Agent、Client 正常启动 | 能完成 `HELLO`、`AUTH`、`PUBLISH` |
-| T2 | Client 执行 `LIST` | 返回服务列表，包含 `online` 和 `lifecycle` |
-| T3 | 调用 `note-box` | 返回文本回显 |
-| T4 | 调用 `win-command` 的 `pwd` | 返回命令输出 |
-| T5 | 错误 Service token | 返回 `403 SERVICE_TOKEN_INVALID` |
-| T6 | 不存在的服务 | 返回 `404 SERVICE_NOT_FOUND` |
-| T7 | Agent 停止后调用服务 | 返回 `503 AGENT_OFFLINE`，服务列表显示 offline |
-| T8 | 输入不符合 schema | 返回 `400 SCHEMA_VALIDATION_FAILED` |
-| T9 | 错误 endpoint token | 返回 `403 ENDPOINT_TOKEN_INVALID` |
-| T10 | 多个 Client 同时调用 | 多个请求都能按各自 `id` 返回 |
+```bash
+cp agent.config.example.json agent.config.json
+cp client.config.example.json client.config.json
+cp services.example.json services.json
+```
+
+三个终端分别运行：
+
+```bash
+python3 relay.py --host 127.0.0.1 --port 9000
+python3 agent.py
+python3 client.py
+```
+
+Agent 会读取 `agent.config.json`。其中 `services_config` 默认指向 `services.json`，所以要发布服务时需要先准备这个文件。
+
+### 8. Client 交互命令
+
+进入 `python3 client.py` 后，可以使用：
+
+```text
+sgp> list
+sgp> help file-box
+sgp> help custom-command
+sgp> text hello
+sgp> cmd pwd
+sgp> http /
+sgp> file ls
+sgp> file stat hello.txt
+sgp> file read hello.txt
+sgp> file write upload.txt hello
+sgp> generic file-box '{"op":"list","path":"."}'
+sgp> quit
+```
+
+`help <service_id>` 会显示该服务的可用命令。`generic` 是底层 JSON 调用入口，主要用于调试或调用没有专门客户端命令的服务。
+
+### 9. file-box 说明
+
+`file-box` 使用 `handlers/file_transfer.py`，访问范围由 `services.json` 里的 `metadata.root_dir` 决定：
+
+```json
+"metadata": {
+  "root_dir": "shared_files",
+  "allow_upload": true
+}
+```
+
+默认情况下，它看到的是 Agent 运行目录下的：
+
+```text
+shared_files/
+```
+
+例如 Agent 在本项目目录运行，则 `file ls` 看到的是：
+
+```text
+/Users/xqqqwq/2026春/homework-2026spring/计网/Socket/shared_files
+```
+
+handler 会做路径限制，Client 传入的路径不能逃出这个根目录。
+
+### 10. 已实现功能
+
+当前代码实现了这些实验功能：
+
+- 固定帧头，能处理 TCP 粘包和半包。
+- `HELLO -> AUTH` 登录流程。
+- 认证成功后发放 session token。
+- 认证后的 JSON body 使用简化方式加密和校验。
+- Agent 通过配置文件发布服务。
+- Client 查询服务列表并在长连接中反复调用服务。
+- Service 级 access proof。
+- Endpoint 级 access proof。
+- Relay 侧 schema 校验。
+- Relay 侧 payload 大小限制、调用频率限制和调用超时。
+- Relay 对 Agent 做基础保活，Agent 断开后服务会标记为 offline。
+- Relay 使用 `id` 匹配同一 Agent 连接上的并发响应。
+- Relay 输出 JSON 行日志，便于观察连接、认证、发布、列表和调用过程。
+
+### 11. 没有实现或只做了原型的部分
+
+这些地方不要理解成生产级能力：
+
+- 没有 TLS、证书校验或中间人防护。
+- 加密是课程实验用的 HMAC keystream，不是标准 TLS/AEAD。
+- 没有 token 轮换、撤销和用户体系。
+- 多 Agent 可以同时连接，但同名 `service_id` 会被后发布者覆盖，没有负载均衡。
+- 并发是线程模型，没有全局背压、队列控制和压力测试。
+- Relay 服务目录只在内存中，重启后会丢失。
+- schema 校验只实现常用 JSON Schema 子集。
 
 ### 12. 错误响应格式
 
-错误响应保留 `status` 和 `message`，同时在 `payload.error` 中给出补充信息，例如：
+错误响应仍保留顶层 `status` 和 `message`，并在 `payload.error` 中给出分层错误信息：
 
 ```json
 {
@@ -228,45 +227,129 @@ Relay 不执行 handler，也不理解文件服务细节，只负责检查通用
   "message": "SERVICE_TOKEN_INVALID",
   "payload": {
     "error": {
+      "layer": "relay",
+      "component": "authz",
       "code": "SERVICE_TOKEN_INVALID",
-      "category": "authz",
-      "retryable": false,
-      "hint": "Check the Service access token."
+      "message": "Service access proof validation failed."
     }
   }
 }
 ```
 
-这个结构主要方便调试。当前错误分类还比较简单，后续可以继续整理得更统一。
+错误只描述协议、Relay、Client、Agent 这些层面能确定的事实。Relay 不会声称理解具体 service 内部为什么失败；handler 返回的错误只作为 Agent 层错误透传。
 
-### 13. 安全说明
+常见层级：
 
-本实验做了几项基础保护：
+| layer | 含义 |
+| --- | --- |
+| `protocol` | 帧格式、版本、JSON、加密校验等问题 |
+| `relay` | Relay 认证、鉴权、schema、路由、限流、超时 |
+| `agent` | Agent 或 handler 返回的问题 |
+| `client` | Client 本地配置或输入问题 |
 
-- 登录时不直接发送共享密钥，而是使用 challenge-response。
-- Service token 和 endpoint token 不直接发送原文，而是发送 proof。
-- 认证后的 JSON body 会加密，抓包时看不到明文 JSON。
-- `LIST` 会过滤 `auth`、`handler`、真实内网地址等字段。
-- `command.exec` 只允许执行白名单命令。
+### 13. Relay 日志
 
-限制也需要说明：
+Relay 输出一行一个 JSON，例如：
 
-- 这不是 TLS，不能替代正式传输安全。
-- 帧头、长度、连接地址、时序等元数据仍然可见。
-- 没有做证书校验、中间人防护、审计日志、token 轮换。
-- 加密实现是课程实验用的简化实现，不建议用于真实公网环境。
+```json
+{"ts":1781090000.123,"component":"relay","event":"call_received","id":"...","service_id":"file-box"}
+{"ts":1781090000.140,"component":"relay","event":"call_completed","id":"...","service_id":"file-box","status":200,"message":"OK","duration_ms":17}
+```
 
-### 14. 当前不足
+这些日志用于实验观察，不写入文件。需要保存时可以用 shell 重定向：
 
-当前版本仍有不少限制：
+```bash
+python3 relay.py --host 127.0.0.1 --port 9000 > relay.log
+```
 
-- `CALL` 仍是同步请求-响应，不支持任务队列、进度事件和取消。
-- schema 只实现了常用 JSON Schema 子集。
-- 错误消息虽然结构化了，但分类还可以更细。
-- 并发没有做全局上限和背压控制。
-- Agent 只用单连接发布服务，多 Agent 负载均衡还没有做。
-- 没有持久化服务目录，Relay 重启后服务表会丢失。
+### 14. 测试建议
 
-### 15. 小结
+建议按下面顺序测试：
 
-本实验实现了一个基于 TCP socket 的应用层协议原型。它包含自定义帧格式、登录认证、服务发布、服务发现、服务调用、基础权限控制、schema 校验和错误处理。实验重点是理解应用层协议需要自己定义消息边界、字段格式和交互流程，而不是追求生产级完整系统。
+| 编号 | 内容 | 预期 |
+| --- | --- | --- |
+| T1 | 启动 Relay、Agent、Client | Agent 发布 `services.json` 中的服务 |
+| T2 | Client 执行 `list` | 显示服务列表和 online 状态 |
+| T3 | `help file-box` | 显示文件服务命令 |
+| T4 | `file ls` | 列出 `shared_files/` 内容 |
+| T5 | `text hello` | 返回文本回显 |
+| T6 | `cmd pwd` | 返回命令输出 |
+| T7 | 使用错误 service token | 返回 `SERVICE_TOKEN_INVALID`，Agent 不会收到调用 |
+| T8 | 输入不符合 schema | 返回 `SCHEMA_VALIDATION_FAILED` |
+| T9 | 停止 Agent 后调用 | 返回 `AGENT_OFFLINE` 或服务显示 offline |
+
+### 15. 录屏建议
+
+录屏建议控制在 5 到 8 分钟，重点展示“协议设计和功能确实跑通”，不要把时间花在解释代码细节上。推荐流程如下：
+
+1. 开场展示目录结构和配置文件。
+   - 展示 `protocol.py`、`relay.py`、`agent.py`、`client.py`。
+   - 展示 `agent.config.json` 中的 `services_config`。
+   - 展示 `services.json` 中的 `file-box`、`custom-note`、`custom-command`、`custom-web`，说明具体能力由 handler 提供。
+
+2. 启动 Relay。
+   - 运行 `python3 relay.py --host 127.0.0.1 --port 9000`。
+   - 说明 Relay 只负责登录、服务目录、校验、转发和日志。
+   - 让屏幕中能看到 Relay 输出的 JSON 行日志。
+
+3. 启动 Agent。
+   - 运行 `python3 agent.py`。
+   - 展示 Agent 加载了几个 handler，并发布了几个服务。
+   - 说明 Agent 没有默认发布服务，发布内容来自 `services.json`。
+
+4. 启动 Client 并查看服务。
+   - 运行 `python3 client.py`。
+   - 输入 `list`。
+   - 输入 `help file-box`，展示服务级帮助。
+   - 输入 `help custom-command`，展示命令白名单。
+
+5. 演示正常调用。
+   - 输入 `text hello`，展示文本回显。
+   - 输入 `cmd pwd`，展示白名单命令输出。
+   - 先准备 `shared_files/hello.txt`，再输入 `file ls` 和 `file read hello.txt`，展示文件服务。
+   - 如果要展示 HTTP 服务，另开终端运行 `python3 -m http.server 8000`，再输入 `http /`。
+
+6. 演示错误处理。
+   - 可以另开一个 Client，用错误 `service_token` 调用，展示 `SERVICE_TOKEN_INVALID`。
+   - 或输入不符合 schema 的 `generic` 调用，展示 `SCHEMA_VALIDATION_FAILED`。
+   - 同时切到 Relay 终端，展示 `call_rejected` 日志。
+
+7. 演示 Agent 离线。
+   - 停止 Agent。
+   - Client 再执行一次调用或 `list`，观察 offline 或 `AGENT_OFFLINE`。
+   - 说明这是 Relay 通过连接关闭和保活维护的生命周期状态。
+
+录屏时建议使用三个终端窗口并排：
+
+```text
+左：Relay 日志
+中：Agent 日志
+右：Client 交互
+```
+
+如果有录音，可以按下面的顺序讲：
+
+```text
+这个实验实现了一个基于 TCP socket 的应用层协议。TCP 只提供字节流，所以我在 protocol.py 中定义了 24 字节帧头和 JSON body。系统分为 Relay、Agent、Client 三个角色。Agent 主动连接 Relay 并发布 services.json 中的服务，Client 通过 LIST 发现服务，再通过 CALL 调用。Relay 不理解具体业务，只做认证、schema、policy 和路由检查。具体业务由 Agent 端 handler 完成。
+```
+
+### 16. LLM 使用说明
+
+本实验开发过程中使用了 LLM 辅助完成部分代码整理、文档润色和调试建议。具体使用方式如下：
+
+- 使用 LLM 协助梳理协议结构，包括 Relay、Agent、Client 的职责划分。
+- 使用 LLM 辅助生成和修改部分 Python 代码，例如 client 交互命令、handler 拆分、错误格式整理和日志格式整理。
+- 使用 LLM 辅助检查 README 和实验文档中与当前实现不一致的表述。
+- 使用 LLM 辅助设计录屏流程和测试顺序。
+
+本人完成和确认的部分包括：
+
+- 确定协议应用场景和最终功能范围。
+- 决定使用 Relay 中继模型，以及 Service、handler、contract、policy 等核心抽象。
+- 运行和验证 Relay、Agent、Client 的端到端流程。
+- 根据实际运行结果修正文档中夸大或不准确的描述。
+- 对最终提交内容进行检查，确保本地配置文件和 token 不被提交。
+
+### 17. 小结
+
+这个实验实现的是一个可观察、可扩展的 socket 协议原型。它展示了应用层协议如何处理消息边界、登录认证、服务目录、调用转发、基础权限控制和错误返回。当前版本适合作为课程实验和演示，不适合作为真实公网生产系统使用。

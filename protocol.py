@@ -25,48 +25,48 @@ ENCRYPTION_TAG_LEN = 32
 FRAME_HEADER_STRUCT = struct.Struct("!4sBBHBBHIII")
 
 ERROR_CATALOG = {
-    "BAD_FRAME_HEADER": ("protocol", False, "Frame header cannot be decoded."),
-    "BAD_FRAME_MAGIC": ("protocol", False, "The peer did not send an SGP frame."),
-    "FRAME_VERSION_NOT_SUPPORTED": ("protocol", False, "Use a supported SGP frame version."),
-    "BAD_FRAME_HEADER_LENGTH": ("protocol", False, "Frame header length is invalid."),
-    "FRAME_BODY_TYPE_NOT_SUPPORTED": ("protocol", False, "Use JSON or encrypted JSON body type."),
-    "BAD_FRAME_RESERVED": ("protocol", False, "Reserved frame fields must be zero."),
-    "BAD_FRAME_LENGTH": ("protocol", False, "Frame body length is empty or too large."),
-    "BAD_FRAME_HEADER_CRC": ("protocol", True, "Retry the request if the connection is otherwise healthy."),
-    "FRAME_TOO_LARGE": ("policy", False, "Reduce the message size."),
-    "BAD_JSON": ("protocol", False, "Send valid UTF-8 JSON."),
-    "VERSION_NOT_SUPPORTED": ("protocol", False, "Use a compatible SGP version."),
-    "BAD_ENCRYPTED_BODY": ("security", False, "Encrypted frame body is malformed."),
-    "BAD_ENCRYPTED_BODY_TAG": ("security", False, "Encrypted frame authentication failed."),
-    "ENCRYPTION_KEY_REQUIRED": ("security", False, "Complete AUTH before sending encrypted frames."),
-    "UNAUTHORIZED": ("auth", False, "Login again and use a valid session token."),
-    "AUTH_FAILED": ("auth", False, "Check the shared secret."),
-    "BAD_AUTH_FLOW": ("auth", False, "Send HELLO before AUTH."),
-    "BAD_ROLE": ("request", False, "Role must be agent or client."),
-    "SERVICE_TOKEN_INVALID": ("authz", False, "Check the Service access token."),
-    "ENDPOINT_TOKEN_INVALID": ("authz", False, "Check the endpoint access token."),
-    "SERVICE_NOT_FOUND": ("routing", False, "Refresh LIST and choose an existing service_id."),
-    "AGENT_OFFLINE": ("lifecycle", True, "Wait for the Agent to reconnect or choose another online service."),
-    "PAYLOAD_TOO_LARGE": ("policy", False, "Reduce payload.input size."),
-    "SCHEMA_VALIDATION_FAILED": ("schema", False, "Adjust payload.input to match the service contract input_schema."),
-    "TOO_MANY_REQUESTS": ("policy", True, "Retry later after the rate limit window resets."),
-    "CALL_TIMEOUT": ("timeout", True, "Retry later or increase the service timeout."),
-    "UNKNOWN_CMD": ("request", False, "Use a supported SGP command."),
-    "COMMAND_NOT_ALLOWED": ("service_policy", False, "Choose a command from the service whitelist."),
-    "COMMAND_TIMEOUT": ("service_timeout", True, "Retry or choose a faster command."),
-    "COMMAND_FAILED": ("service_runtime", True, "Check the Agent environment and command availability."),
-    "ENDPOINT_NOT_FOUND": ("service_routing", False, "Choose an endpoint from the service contract."),
-    "METHOD_NOT_ALLOWED": ("service_policy", False, "Use an allowed HTTP method for this endpoint."),
-    "BODY_TOO_LARGE": ("service_policy", False, "Reduce the HTTP request body size."),
-    "HTTP_REQUEST_FAILED": ("service_runtime", True, "Check the local HTTP service behind the Agent."),
-    "CUSTOM_HANDLER_FAILED": ("service_runtime", False, "Check the custom handler implementation."),
-    "UNSUPPORTED_SERVICE_TYPE": ("service_runtime", False, "Add a handler for this service_type."),
-    "DIR_NOT_FOUND": ("service_routing", False, "Choose an existing directory under the service root."),
-    "PATH_NOT_FOUND": ("service_routing", False, "Choose an existing path under the service root."),
-    "FILE_NOT_FOUND": ("service_routing", False, "Choose an existing file under the service root."),
-    "UPLOAD_DISABLED": ("service_policy", False, "Enable allow_upload before writing files."),
-    "CHUNK_TOO_LARGE": ("service_policy", False, "Reduce chunk size."),
-    "UNKNOWN_FILE_OP": ("request", False, "Use one of the supported file operations."),
+    "BAD_FRAME_HEADER": ("protocol", "frame", "Frame header is malformed."),
+    "BAD_FRAME_MAGIC": ("protocol", "frame", "Frame magic does not match SGP."),
+    "FRAME_VERSION_NOT_SUPPORTED": ("protocol", "version", "Frame version is not supported."),
+    "BAD_FRAME_HEADER_LENGTH": ("protocol", "frame", "Frame header length is invalid."),
+    "FRAME_BODY_TYPE_NOT_SUPPORTED": ("protocol", "frame", "Frame body type is not supported."),
+    "BAD_FRAME_RESERVED": ("protocol", "frame", "Reserved frame fields are invalid."),
+    "BAD_FRAME_LENGTH": ("protocol", "frame", "Frame body length is invalid."),
+    "BAD_FRAME_HEADER_CRC": ("protocol", "frame", "Frame header checksum validation failed."),
+    "FRAME_TOO_LARGE": ("protocol", "frame", "Frame body exceeds the maximum size."),
+    "BAD_JSON": ("protocol", "body", "Frame body is not valid JSON."),
+    "VERSION_NOT_SUPPORTED": ("protocol", "version", "Message version is not supported."),
+    "BAD_ENCRYPTED_BODY": ("protocol", "crypto", "Encrypted frame body is malformed."),
+    "BAD_ENCRYPTED_BODY_TAG": ("protocol", "crypto", "Encrypted frame authentication failed."),
+    "ENCRYPTION_KEY_REQUIRED": ("protocol", "crypto", "Encrypted frame received before session key setup."),
+    "UNAUTHORIZED": (None, "auth", "Session token is missing, invalid, or expired."),
+    "AUTH_FAILED": (None, "auth", "Authentication proof validation failed."),
+    "BAD_AUTH_FLOW": (None, "auth", "Authentication command sequence is invalid."),
+    "BAD_ROLE": (None, "request", "Connection role is invalid."),
+    "SERVICE_TOKEN_INVALID": ("relay", "authz", "Service access proof validation failed."),
+    "ENDPOINT_TOKEN_INVALID": ("relay", "authz", "Endpoint access proof validation failed."),
+    "SERVICE_NOT_FOUND": ("relay", "routing", "Service id is not registered."),
+    "AGENT_OFFLINE": ("relay", "routing", "Service publisher is not online."),
+    "PAYLOAD_TOO_LARGE": ("relay", "policy", "Request payload exceeds service policy."),
+    "SCHEMA_VALIDATION_FAILED": ("relay", "schema", "Request input does not match service schema."),
+    "TOO_MANY_REQUESTS": ("relay", "policy", "Service rate limit exceeded."),
+    "CALL_TIMEOUT": ("relay", "routing", "Agent did not respond before the call timeout."),
+    "UNKNOWN_CMD": (None, "request", "Command is not supported."),
+    "COMMAND_NOT_ALLOWED": ("agent", "handler", "Service handler rejected the request."),
+    "COMMAND_TIMEOUT": ("agent", "handler", "Service handler timed out."),
+    "COMMAND_FAILED": ("agent", "handler", "Service handler failed to execute."),
+    "ENDPOINT_NOT_FOUND": ("agent", "handler", "Service handler could not resolve the endpoint."),
+    "METHOD_NOT_ALLOWED": ("agent", "handler", "Service handler rejected the HTTP method."),
+    "BODY_TOO_LARGE": ("agent", "handler", "Service handler rejected the request body size."),
+    "HTTP_REQUEST_FAILED": ("agent", "handler", "Service handler could not complete the HTTP request."),
+    "CUSTOM_HANDLER_FAILED": ("agent", "handler", "Service handler raised an exception."),
+    "UNSUPPORTED_SERVICE_TYPE": ("agent", "handler", "No handler is registered for this service."),
+    "DIR_NOT_FOUND": ("agent", "handler", "Service handler could not resolve the directory."),
+    "PATH_NOT_FOUND": ("agent", "handler", "Service handler could not resolve the path."),
+    "FILE_NOT_FOUND": ("agent", "handler", "Service handler could not resolve the file."),
+    "UPLOAD_DISABLED": ("agent", "handler", "Service handler rejected the write request."),
+    "CHUNK_TOO_LARGE": ("agent", "handler", "Service handler rejected the chunk size."),
+    "UNKNOWN_FILE_OP": ("agent", "handler", "Service handler rejected the file operation."),
 }
 
 _seq_lock = threading.Lock()
@@ -424,21 +424,19 @@ def _default_error_category(status):
     return "request"
 
 
-def make_error(message, status, detail=None, hint=None, retryable=None):
-    category, default_retryable, default_hint = ERROR_CATALOG.get(
+def make_error(message, status, detail=None, role=None):
+    layer, component, text = ERROR_CATALOG.get(
         message,
-        (_default_error_category(status), status in (408, 429, 502, 503), "Check request parameters and service state."),
+        (None, _default_error_category(status), "Request failed."),
     )
     error = {
+        "layer": layer or role or "protocol",
+        "component": component,
         "code": message,
-        "category": category,
-        "retryable": default_retryable if retryable is None else bool(retryable),
+        "message": text,
     }
     if detail not in (None, {}, []):
         error["detail"] = detail
-    final_hint = default_hint if hint is None else hint
-    if final_hint:
-        error["hint"] = final_hint
     return error
 
 
@@ -448,7 +446,7 @@ def make_resp(req, role, status=200, message="OK", payload=None, service_id=None
         detail = resp_payload.get("output") if set(resp_payload.keys()) == {"output"} else dict(resp_payload)
         if detail == {}:
             detail = None
-        resp_payload["error"] = make_error(message, status, detail=detail)
+        resp_payload["error"] = make_error(message, status, detail=detail, role=role)
     return make_msg(
         req.get("cmd", "ERROR"),
         role,

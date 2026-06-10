@@ -227,7 +227,7 @@ python3 client.py --call http --endpoint api --endpoint-token endpoint-token --m
 
 ### 演示错误处理
 
-错误响应保留 `status/message`，并在 `payload.error` 中提供分级信息：`code`、`category`、`retryable`、`hint`，必要时还会带 `detail`。
+错误响应保留 `status/message`，并在 `payload.error` 中提供分层信息：`layer`、`component`、`code`、`message`，必要时会带 `detail`。
 
 错误 service token：
 

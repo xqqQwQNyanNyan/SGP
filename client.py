@@ -52,43 +52,20 @@ def print_json(obj):
     print(json.dumps(obj, ensure_ascii=False, indent=2))
 
 
-def error_hint(message):
-    hints = {
-        "AUTH_FAILED": "认证失败：共享密钥不对，请检查 --secret 或 client.config.json。",
-        "SERVICE_TOKEN_INVALID": "Service token 不对。Relay 已拒绝本次 CALL，请求没有转发到 agent。",
-        "ENDPOINT_TOKEN_INVALID": "Endpoint token 不对。Relay 已拒绝本次 CALL，请求没有转发到 agent。",
-        "SERVICE_NOT_FOUND": "没有这个 service_id，先执行 --list 查看可用服务。",
-        "AGENT_OFFLINE": "服务发布方不在线，等 agent 重连后再试。",
-        "SCHEMA_VALIDATION_FAILED": "输入字段不符合该服务的 contract。",
-        "CALL_TIMEOUT": "调用超时，可能是 agent 或后端 HTTP 服务响应太慢。",
-        "HTTP_REQUEST_FAILED": "agent 后面的本地 HTTP 服务没起来或不可访问。",
-    }
-    return hints.get(message, message or "未知错误")
-
-
 def print_status(resp):
     status = resp.get("status")
     message = resp.get("message", "")
     if status and status >= 400:
-        print(f"失败 {status}: {error_hint(message)}")
+        print(f"失败 {status}: {message}")
         error = resp.get("payload", {}).get("error", {})
         if isinstance(error, dict):
-            code = error.get("code")
-            category = error.get("category")
-            retryable = error.get("retryable")
-            hint = error.get("hint")
-            if code:
-                print(f"错误码: {code}")
-            if category:
-                print(f"类型: {category}")
-            if retryable is not None:
-                print(f"可重试: {'是' if retryable else '否'}")
-            if message == "SERVICE_TOKEN_INVALID":
-                print("怎么改: 在 client.config.json 里设置 service_token，或在交互模式输入 set service-token <token>。")
-            elif message == "ENDPOINT_TOKEN_INVALID":
-                print("怎么改: 在 client.config.json 里设置 endpoint_token，或在交互模式输入 set endpoint-token <token>。")
-            elif hint:
-                print(f"提示: {hint}")
+            print(f"layer: {error.get('layer')}")
+            print(f"component: {error.get('component')}")
+            print(f"code: {error.get('code')}")
+            print(f"message: {error.get('message')}")
+            if "detail" in error:
+                print("detail:")
+                print_json(error["detail"])
     else:
         print(f"成功 {status}: {message}")
 
@@ -740,7 +717,7 @@ def main():
     except KeyboardInterrupt:
         print("\n[client] stopped")
     except Exception as exc:
-        print(f"[client] error: {error_hint(str(exc))}", file=sys.stderr)
+        print(f"[client] error: {exc}", file=sys.stderr)
         sys.exit(1)
     finally:
         close_quietly(sock)
